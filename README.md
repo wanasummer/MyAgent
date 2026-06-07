@@ -337,7 +337,7 @@ npm test
 
 ## 📄 许可证
 
-MIT © [Your Name]
+MIT © [XTW]
 
 ---
 
