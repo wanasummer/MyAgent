@@ -6,6 +6,9 @@
  *   2. 持久化记忆 — 全部记忆摘要注入 system prompt
  *   3. 🔍 RAG 语义检索 — 每轮对话动态检索与用户输入最相关的片段
  *
+ * 🔌 MCP 集成：
+ *   4. MCP Manager — 管理外部 MCP Server，动态发现和调用工具
+ *
  * 🛡️ 所有路径动态获取（os.homedir()），不硬编码。
  */
 
@@ -13,11 +16,17 @@ import * as os from "os";
 import * as path from "path";
 import { chatWithTools } from "./llm-client";
 import { SYSTEM_PROMPT } from "./system-prompt";
-import { TOOL_DEFINITIONS } from "./tool-definitions";
+import { TOOL_DEFINITIONS, ToolDefinition } from "./tool-definitions";
 import { executeTool, isAsyncTool } from "../tool-executor";
 import { formatMemoryContext, searchMemories } from "../memory/memory-store";
+import { getMcpManager } from "../mcp/mcp-manager";
 
 const MAX_TURNS = 40;
+
+/** MCP 是否已初始化 */
+let mcpInitialized = false;
+/** MCP 初始化 Promise（防止并发初始化） */
+let mcpInitPromise: Promise<void> | null = null;
 
 function buildContext(): string {
   const homeDir = os.homedir();
@@ -61,9 +70,54 @@ function buildSystemPrompt(userInput?: string): string {
   return prompt;
 }
 
+/** 确保 MCP Manager 已初始化（lazy, 只初始化一次） */
+async function ensureMcpInitialized(): Promise<void> {
+  if (mcpInitialized) return;
+
+  if (mcpInitPromise) {
+    await mcpInitPromise;
+    return;
+  }
+
+  mcpInitPromise = (async () => {
+    try {
+      await getMcpManager().initialize();
+      mcpInitialized = true;
+    } catch (err: any) {
+      console.log(`  ⚠️ MCP 初始化失败: ${err.message}`);
+      mcpInitialized = true;
+    }
+  })();
+
+  await mcpInitPromise;
+}
+
 export interface AgentResult {
   answer: string;
   history: Array<{ role: string; content: unknown }>;
+}
+
+/**
+ * 格式化工具参数用于日志输出。
+ * 对 content、text 等长文本参数截断显示，避免满屏 \n。
+ */
+function formatArgsForLog(args: Record<string, unknown>): string {
+  const maxLen = 120;
+  const display: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(args)) {
+    if (typeof value === "string" && value.length > maxLen) {
+      // 长文本：显示前 maxLen 字符 + 统计信息
+      const lines = value.split("\n").length;
+      display[key] =
+        value.slice(0, maxLen).replace(/\n/g, "↵") +
+        `… (共 ${value.length} 字符, ${lines} 行)`;
+    } else {
+      display[key] = value;
+    }
+  }
+
+  return JSON.stringify(display);
 }
 
 /**
@@ -73,6 +127,13 @@ export async function runAgent(
   userInput: string,
   history?: Array<{ role: string; content: unknown }>
 ): Promise<AgentResult> {
+  // 🔌 懒初始化 MCP
+  await ensureMcpInitialized();
+
+  // 🔌 获取 MCP 工具并合并
+  const mcpTools = getMcpManager().getAllToolDefs();
+  const allTools: ToolDefinition[] = [...TOOL_DEFINITIONS, ...mcpTools];
+
   const systemPrompt = buildSystemPrompt(userInput);
 
   const messages: Array<{ role: string; content: unknown }> = history
@@ -87,7 +148,7 @@ export async function runAgent(
     const response = await chatWithTools({
       system: systemPrompt,
       messages,
-      tools: TOOL_DEFINITIONS,
+      tools: allTools,
     });
 
     const stopReason: string = response.stop_reason;
@@ -112,11 +173,15 @@ export async function runAgent(
         const toolArgs = tc.input || {};
 
         console.log(
-          `  🔧 [第 ${turns} 轮] 调用工具: ${toolName}(${JSON.stringify(toolArgs)})`
+          `  🔧 [第 ${turns} 轮] 调用工具: ${toolName}(${formatArgsForLog(toolArgs)})`
         );
 
         let result: unknown;
-        if (isAsyncTool(toolName)) {
+
+        // 🔌 MCP 工具路由：以 mcp__ 前缀开头
+        if (toolName.startsWith("mcp__")) {
+          result = await getMcpManager().callTool(toolName, toolArgs);
+        } else if (isAsyncTool(toolName)) {
           result = await (executeTool(toolName, toolArgs) as Promise<unknown>);
         } else {
           result = executeTool(toolName, toolArgs);
@@ -144,16 +209,13 @@ export async function runAgent(
       (b: any) => b.type === "text"
     ) as Array<{ type: "text"; text: string }>;
 
-    const answer =
-      textBlocks.length > 0
-        ? textBlocks.map((b) => b.text).join("\n\n")
-        : "（模型未输出文本）";
+    const answer = textBlocks.map((b) => b.text).join("\n");
 
     return { answer, history: messages };
   }
 
   return {
-    answer: `⚠️ 超过最大推理轮次 (${MAX_TURNS})，已中止。`,
+    answer: "⚠️ 达到最大轮数限制，已停止思考。",
     history: messages,
   };
 }
