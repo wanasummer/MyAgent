@@ -137,29 +137,19 @@ async function main() {
       ) {
         console.log(chalk.gray("  👋 再见！\n"));
         rl.close();
-        return;
+        process.exit(0);
       }
 
-      // 列出持久化记忆
-      if (
-        trimmed.toLowerCase() === "/memories" ||
-        trimmed.toLowerCase() === "/memory"
-      ) {
+      if (trimmed.toLowerCase() === "/memories") {
         const mems = loadMemories();
         if (mems.length === 0) {
           console.log(chalk.gray("  📝 暂无持久化记忆。\n"));
         } else {
           console.log(chalk.cyan(`  📝 持久化记忆 (${mems.length} 条):`));
           for (const m of mems) {
-            const label: Record<string, string> = {
-              user: "👤",
-              feedback: "💬",
-              project: "📁",
-              reference: "📖",
-            };
             console.log(
               chalk.gray(
-                `    [${label[m.type] || "📖"} ${m.type}] ${m.name} — ${m.description}`
+                `    - ${m.name} [${m.type}]: ${m.description}`
               )
             );
           }
@@ -169,64 +159,62 @@ async function main() {
         return;
       }
 
-      // RAG 语义搜索记忆
       if (trimmed.toLowerCase().startsWith("/search ")) {
-        const query = trimmed.slice(8).trim();
-        if (!query) {
+        const keyword = trimmed.slice(8).trim();
+        if (!keyword) {
           console.log(chalk.gray("  用法: /search <关键词>\n"));
+          ask();
+          return;
+        }
+        const results = searchMemories(keyword, 5);
+        if (!results || results.trim() === "") {
+          console.log(chalk.gray(`  🔍 未找到与「${keyword}」相关的记忆。\n`));
         } else {
-          const result = searchMemories(query, 5);
-          console.log(
-            chalk.cyan(`  🔍 RAG 检索结果:\n${result || "  无相关记忆"}\n`)
-          );
+          console.log(chalk.cyan(`  🔍 RAG 检索结果:\n${results}\n`));
         }
         ask();
         return;
       }
 
-      // 删除记忆
       if (trimmed.toLowerCase().startsWith("/forget ")) {
         const name = trimmed.slice(8).trim();
         if (!name) {
           console.log(chalk.gray("  用法: /forget <记忆名称>\n"));
+          ask();
+          return;
+        }
+        const deleted = deleteMemory(name);
+        if (deleted) {
+          console.log(chalk.yellow(`  🗑️ 已删除记忆: ${name}\n`));
         } else {
-          const ok = deleteMemory(name);
-          console.log(
-            ok
-              ? chalk.yellow(`  🗑️ 已删除记忆: ${name}\n`)
-              : chalk.red(`  ❌ 未找到记忆: ${name}\n`)
-          );
+          console.log(chalk.red(`  ❌ 未找到记忆: ${name}\n`));
         }
         ask();
         return;
       }
 
-      // 重建 RAG 索引
       if (trimmed.toLowerCase() === "/rag-rebuild") {
         console.log(chalk.gray("  🔄 正在重建 RAG 向量索引..."));
         const result = rebuildRagIndex();
         console.log(
-          chalk.green(
-            `  ✅ RAG 索引已重建 (${result.embedded}/${result.total} 条记忆)\n`
+          chalk.gray(
+            `  ✅ RAG 索引重建完成 (${result.embedded}/${result.total} 条记忆)\n`
           )
         );
         ask();
         return;
       }
 
-      // ── 主 Agent 循环 ──────────────────────
-      console.log("");
-
+      // ── 正常对话 ──────────────────────────
       try {
         const result = await runAgent(trimmed, conversationHistory);
-
         if (result.answer) {
-          console.log(chalk.blue(`\n🤖 Agent: ${result.answer}\n`));
+          // 🎨 只在标签上使用背景色，回答正文不带背景色，避免 ANSI 换行渲染异常
+          console.log(chalk.bgCyan.black(`\n🤖 Agent:`) + ` ${result.answer}\n`);
         }
-
         conversationHistory = result.history;
       } catch (err: any) {
-        console.error(chalk.red(`\n  ❌ 错误: ${err.message}\n`));
+        console.error(chalk.red(`  ❌ 出错了: ${err.message}`));
       }
 
       ask();
@@ -237,6 +225,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error(chalk.red("Fatal error:"), err);
-  process.exit(1);
+  console.error(chalk.red("FATAL:"), err);
+  process.exit(2);
 });

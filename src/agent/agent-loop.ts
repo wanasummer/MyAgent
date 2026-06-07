@@ -17,7 +17,7 @@ import { TOOL_DEFINITIONS } from "./tool-definitions";
 import { executeTool, isAsyncTool } from "../tool-executor";
 import { formatMemoryContext, searchMemories } from "../memory/memory-store";
 
-const MAX_TURNS = 20;
+const MAX_TURNS = 40;
 
 function buildContext(): string {
   const homeDir = os.homedir();
@@ -139,14 +139,15 @@ export async function runAgent(
       continue;
     }
 
-    // 最终回答
+    // 最终回答 — 提取文本块，确保换行符正确渲染不被压缩
     const textBlocks = content.filter(
       (b: any) => b.type === "text"
     ) as Array<{ type: "text"; text: string }>;
+
     const answer =
       textBlocks.length > 0
-        ? textBlocks.map((b) => b.text).join("\n")
-        : "(Agent 未返回文本)";
+        ? textBlocks.map((b) => b.text).join("\n\n")
+        : "（模型未输出文本）";
 
     return { answer, history: messages };
   }
