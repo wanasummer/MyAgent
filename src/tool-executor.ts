@@ -4,6 +4,7 @@
  */
 
 import { FileUtils } from "./utils/file-utils";
+import * as memoryStore from "./memory/memory-store";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
@@ -120,6 +121,50 @@ export function executeTool(
     case "delete_path":
       return {
         success: FileUtils.deletePath(resolvePath(args.target as string)),
+      };
+
+    // ── 记忆管理 ──────────────────────────────
+    case "list_memories": {
+      const memories = memoryStore.loadMemories();
+      return {
+        count: memories.length,
+        memories: memories.map((m) => ({
+          name: m.name,
+          description: m.description,
+          type: m.type,
+        })),
+      };
+    }
+
+    case "recall_memory": {
+      const memories = memoryStore.loadMemories();
+      const found = memories.find((m) => m.name === args.name);
+      if (!found) {
+        return { error: `未找到记忆: ${args.name}` };
+      }
+      return {
+        name: found.name,
+        description: found.description,
+        type: found.type,
+        content: found.content,
+      };
+    }
+
+    case "save_memory":
+      return {
+        success: memoryStore.saveMemory(
+          {
+            name: args.name as string,
+            description: args.description as string,
+            type: (args.type as memoryStore.MemoryMeta["type"]) || "reference",
+          },
+          (args.content as string) || ""
+        ),
+      };
+
+    case "delete_memory":
+      return {
+        success: memoryStore.deleteMemory(args.name as string),
       };
 
     default:

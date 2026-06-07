@@ -6,6 +6,10 @@
  *   - tool 调用在 assistant content 块中（type: "tool_use"）
  *   - tool 结果作为 user message 返回（type: "tool_result"）
  *   - stop_reason 指示 "tool_use" 或 "end_turn"
+ *
+ * 🧠 记忆功能：
+ *   1. 会话记忆 — 传入对话历史 (history)，让 Agent 记住之前和用户说过的话。
+ *   2. 持久化记忆 — 加载 ~/.myagent/memory/ 中的记忆文件，注入 system prompt。
  */
 
 import * as os from "os";
@@ -13,9 +17,13 @@ import { chatWithTools } from "./llm-client";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
 import { executeTool } from "../tool-executor";
+import { formatMemoryContext } from "../memory/memory-store";
 
 const MAX_TURNS = 10;
 
+/**
+ * 构建运行时上下文，注入到系统提示词中。
+ */
 function buildContext(): string {
   const homeDir = os.homedir();
   const desktopDir = `${homeDir}\\Desktop`;
@@ -32,20 +40,41 @@ function buildContext(): string {
   ].join("\n");
 }
 
-const RESOLVED_SYSTEM_PROMPT = SYSTEM_PROMPT.replace(
-  "{{CONTEXT}}",
-  buildContext()
-)
-  .replace("{{PROJECT_DIR}}", process.cwd())
-  .replace("{{HOME_DIR}}", os.homedir())
-  .replace("{{DESKTOP_DIR}}", `${os.homedir()}\\Desktop`);
+/**
+ * 构建完整的 system prompt（含环境上下文 + 持久化记忆）。
+ */
+function buildSystemPrompt(): string {
+  return SYSTEM_PROMPT.replace("{{CONTEXT}}", buildContext())
+    .replace("{{MEMORY}}", formatMemoryContext())
+    .replace("{{PROJECT_DIR}}", process.cwd())
+    .replace("{{HOME_DIR}}", os.homedir())
+    .replace("{{DESKTOP_DIR}}", `${os.homedir()}\\Desktop`);
+}
 
-export async function runAgent(userInput: string): Promise<string> {
-  const systemPrompt = RESOLVED_SYSTEM_PROMPT;
+export interface AgentResult {
+  /** 最终回答文本 */
+  answer: string;
+  /** 更新后的完整对话历史（包含本轮 user 输入、assistant 工具调用、最终回答），传给下一轮 */
+  history: Array<{ role: string; content: unknown }>;
+}
 
-  const messages: Array<{ role: string; content: unknown }> = [
-    { role: "user", content: userInput },
-  ];
+/**
+ * 运行一次 Agent 对话。
+ *
+ * @param userInput 用户输入文本
+ * @param history   可选的历史消息列表。传入后可让 Agent 记住之前的对话。
+ * @returns AgentResult，包含回答和更新后的历史
+ */
+export async function runAgent(
+  userInput: string,
+  history?: Array<{ role: string; content: unknown }>
+): Promise<AgentResult> {
+  const systemPrompt = buildSystemPrompt();
+
+  // 🧠 如果有历史消息，则在此基础上追加；否则新建
+  const messages: Array<{ role: string; content: unknown }> = history
+    ? [...history, { role: "user", content: userInput }]
+    : [{ role: "user", content: userInput }];
 
   let turns = 0;
 
@@ -104,11 +133,15 @@ export async function runAgent(userInput: string): Promise<string> {
 
     // 最终回答
     const textBlocks = content.filter((b: any) => b.type === "text") as Array<{ type: "text"; text: string }>;
-    return (
+    const answer =
       textBlocks.map((b) => b.text).join("\n") ||
-      "（Agent 没有返回内容）"
-    );
+      "（Agent 没有返回内容）";
+
+    return { answer, history: messages };
   }
 
-  return "⚠️ 已达到最大执行轮次 (10)，任务可能未完成。请尝试简化你的请求。";
+  return {
+    answer: "⚠️ 已达到最大执行轮次 (10)，任务可能未完成。请尝试简化你的请求。",
+    history: messages,
+  };
 }

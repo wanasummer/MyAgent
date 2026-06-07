@@ -183,6 +183,74 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       required: ["source", "destination"],
     },
   },
+  // ── 记忆管理工具 ──────────────────────────
+  {
+    name: "save_memory",
+    description:
+      "保存一条持久化记忆。记忆会存储在 ~/.myagent/memory/ 目录中，跨会话保留。" +
+      "当你发现用户的重要偏好、习惯、常用路径、项目信息、或用户明确要求「记住」时，应主动调用此工具。",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "记忆名称（kebab-case 格式，如 'user-preferred-editor'）",
+        },
+        description: {
+          type: "string",
+          description: "一行概要，用于判断记忆相关性",
+        },
+        type: {
+          type: "string",
+          enum: ["user", "feedback", "project", "reference"],
+          description: "记忆类型：user=用户偏好, feedback=用户反馈, project=项目信息, reference=参考信息",
+        },
+        content: {
+          type: "string",
+          description: "记忆的完整内容，用 Markdown 格式书写",
+        },
+      },
+      required: ["name", "description", "type", "content"],
+    },
+  },
+  {
+    name: "recall_memory",
+    description:
+      "读取某条记忆的完整内容。当用户提到「上次」「之前」「像以前那样」或你需要回忆过去的重要信息时使用。",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "要读取的记忆名称",
+        },
+      },
+      required: ["name"],
+    },
+  },
+  {
+    name: "list_memories",
+    description: "列出所有已保存的持久化记忆摘要。",
+    input_schema: {
+      type: "object",
+      properties: {},
+      required: [],
+    },
+  },
+  {
+    name: "delete_memory",
+    description: "删除一条持久化记忆。删除前必须得到用户的明确同意！",
+    input_schema: {
+      type: "object",
+      properties: {
+        name: {
+          type: "string",
+          description: "要删除的记忆名称",
+        },
+      },
+      required: ["name"],
+    },
+  },
   {
     name: "delete_path",
     description:
