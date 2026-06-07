@@ -1,6 +1,8 @@
 /**
  * 工具执行器 — 将 LLM 工具调用映射到真实的本地函数。
  * 不依赖任何 AI 逻辑，纯粹的函数调度层。
+ *
+ * 支持同步和异步工具。
  */
 
 import { FileUtils } from "./utils/file-utils";
@@ -20,6 +22,9 @@ function resolvePath(p: string): string {
   return path.resolve(p);
 }
 
+/**
+ * 执行工具调用。同步工具直接返回，异步工具返回 Promise。
+ */
 export function executeTool(
   name: string,
   args: Record<string, unknown>
@@ -150,24 +155,40 @@ export function executeTool(
       };
     }
 
-    case "save_memory":
-      return {
-        success: memoryStore.saveMemory(
-          {
-            name: args.name as string,
-            description: args.description as string,
-            type: (args.type as memoryStore.MemoryMeta["type"]) || "reference",
-          },
-          (args.content as string) || ""
-        ),
-      };
+    case "save_memory": {
+      const success = memoryStore.saveMemory(
+        {
+          name: args.name as string,
+          description: args.description as string,
+          type: args.type as "user" | "feedback" | "project" | "reference",
+        },
+        args.content as string
+      );
+      return { success };
+    }
 
-    case "delete_memory":
-      return {
-        success: memoryStore.deleteMemory(args.name as string),
-      };
+    case "delete_memory": {
+      const success = memoryStore.deleteMemory(args.name as string);
+      return { success };
+    }
+
+    // 🔍 RAG: 语义记忆检索（异步，返回 Promise）
+    case "search_memories": {
+      const query = args.query as string;
+      const topK = (args.topK as number) || 5;
+      // 返回 Promise — 调用方需要 await
+      return memoryStore.searchMemories(query, topK);
+    }
 
     default:
       return { error: `未知工具: ${name}` };
   }
+}
+
+/**
+ * 判断工具是否是异步的。
+ * search_memories 需要异步嵌入 + 检索，其他工具都是同步的。
+ */
+export function isAsyncTool(name: string): boolean {
+  return name === "search_memories";
 }

@@ -1,32 +1,27 @@
 /**
  * 核心 Agent 循环 (ReAct Loop)。
  *
- * Anthropic Messages API 格式：
- *   - system 是顶层参数（不是 message）
- *   - tool 调用在 assistant content 块中（type: "tool_use"）
- *   - tool 结果作为 user message 返回（type: "tool_result"）
- *   - stop_reason 指示 "tool_use" 或 "end_turn"
+ * 🧠 记忆功能（RAG 升级版）：
+ *   1. 会话记忆 — 传入对话历史
+ *   2. 持久化记忆 — 全部记忆摘要注入 system prompt
+ *   3. 🔍 RAG 语义检索 — 每轮对话动态检索与用户输入最相关的片段
  *
- * 🧠 记忆功能：
- *   1. 会话记忆 — 传入对话历史 (history)，让 Agent 记住之前和用户说过的话。
- *   2. 持久化记忆 — 加载 ~/.myagent/memory/ 中的记忆文件，注入 system prompt。
+ * 🛡️ 所有路径动态获取（os.homedir()），不硬编码。
  */
 
 import * as os from "os";
+import * as path from "path";
 import { chatWithTools } from "./llm-client";
 import { SYSTEM_PROMPT } from "./system-prompt";
 import { TOOL_DEFINITIONS } from "./tool-definitions";
-import { executeTool } from "../tool-executor";
-import { formatMemoryContext } from "../memory/memory-store";
+import { executeTool, isAsyncTool } from "../tool-executor";
+import { formatMemoryContext, searchMemories } from "../memory/memory-store";
 
 const MAX_TURNS = 20;
 
-/**
- * 构建运行时上下文，注入到系统提示词中。
- */
 function buildContext(): string {
   const homeDir = os.homedir();
-  const desktopDir = `${homeDir}\\Desktop`;
+  const desktopDir = path.join(homeDir, "Desktop");
   const projectDir = process.cwd();
 
   return [
@@ -41,37 +36,45 @@ function buildContext(): string {
 }
 
 /**
- * 构建完整的 system prompt（含环境上下文 + 持久化记忆）。
+ * 构建完整 system prompt（含环境 + 记忆摘要 + RAG 检索）。
  */
-function buildSystemPrompt(): string {
-  return SYSTEM_PROMPT.replace("{{CONTEXT}}", buildContext())
+function buildSystemPrompt(userInput?: string): string {
+  let prompt = SYSTEM_PROMPT
+    .replace("{{CONTEXT}}", buildContext())
     .replace("{{MEMORY}}", formatMemoryContext())
     .replace("{{PROJECT_DIR}}", process.cwd())
     .replace("{{HOME_DIR}}", os.homedir())
-    .replace("{{DESKTOP_DIR}}", `${os.homedir()}\\Desktop`);
+    .replace("{{DESKTOP_DIR}}", path.join(os.homedir(), "Desktop"));
+
+  // 🔍 RAG: 动态检索与当前输入相关的记忆片段
+  if (userInput) {
+    try {
+      const ragResults = searchMemories(userInput, 5);
+      if (ragResults) {
+        prompt += "\n" + ragResults;
+      }
+    } catch {
+      // 检索失败不影响主流程
+    }
+  }
+
+  return prompt;
 }
 
 export interface AgentResult {
-  /** 最终回答文本 */
   answer: string;
-  /** 更新后的完整对话历史（包含本轮 user 输入、assistant 工具调用、最终回答），传给下一轮 */
   history: Array<{ role: string; content: unknown }>;
 }
 
 /**
  * 运行一次 Agent 对话。
- *
- * @param userInput 用户输入文本
- * @param history   可选的历史消息列表。传入后可让 Agent 记住之前的对话。
- * @returns AgentResult，包含回答和更新后的历史
  */
 export async function runAgent(
   userInput: string,
   history?: Array<{ role: string; content: unknown }>
 ): Promise<AgentResult> {
-  const systemPrompt = buildSystemPrompt();
+  const systemPrompt = buildSystemPrompt(userInput);
 
-  // 🧠 如果有历史消息，则在此基础上追加；否则新建
   const messages: Array<{ role: string; content: unknown }> = history
     ? [...history, { role: "user", content: userInput }]
     : [{ role: "user", content: userInput }];
@@ -90,11 +93,11 @@ export async function runAgent(
     const stopReason: string = response.stop_reason;
     const content = response.content;
 
-    // 存 assistant 消息
     messages.push({ role: "assistant", content });
 
-    // 收集 tool_use
-    const toolUses = content.filter((b: any) => b.type === "tool_use") as Array<{
+    const toolUses = content.filter(
+      (b: any) => b.type === "tool_use"
+    ) as Array<{
       type: "tool_use";
       id: string;
       name: string;
@@ -112,7 +115,12 @@ export async function runAgent(
           `  🔧 [第 ${turns} 轮] 调用工具: ${toolName}(${JSON.stringify(toolArgs)})`
         );
 
-        const result = executeTool(toolName, toolArgs);
+        let result: unknown;
+        if (isAsyncTool(toolName)) {
+          result = await (executeTool(toolName, toolArgs) as Promise<unknown>);
+        } else {
+          result = executeTool(toolName, toolArgs);
+        }
 
         const resultStr = JSON.stringify(result, null, 2);
         const truncated =
@@ -132,16 +140,19 @@ export async function runAgent(
     }
 
     // 最终回答
-    const textBlocks = content.filter((b: any) => b.type === "text") as Array<{ type: "text"; text: string }>;
+    const textBlocks = content.filter(
+      (b: any) => b.type === "text"
+    ) as Array<{ type: "text"; text: string }>;
     const answer =
-      textBlocks.map((b) => b.text).join("\n") ||
-      "（Agent 没有返回内容）";
+      textBlocks.length > 0
+        ? textBlocks.map((b) => b.text).join("\n")
+        : "(Agent 未返回文本)";
 
     return { answer, history: messages };
   }
 
   return {
-    answer: "⚠️ 已达到最大执行轮次 (10)，任务可能未完成。请尝试简化你的请求。",
+    answer: `⚠️ 超过最大推理轮次 (${MAX_TURNS})，已中止。`,
     history: messages,
   };
 }

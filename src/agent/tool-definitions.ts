@@ -165,9 +165,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "move_path",
     description:
-      "移动文件或整个目录到新位置（同盘符下是瞬间完成）。" +
-      "适用于：用户说「把 X 移到 Y」、「把 X 归入 Y 文件夹」、「整理文件」等场景。" +
-      "可以移动文件和目录。目标路径的父目录必须存在。",
+      "移动文件或整个目录到新位置（同盘符下是瞬间完成）。适用于：用户说「把 X 移到 Y」、「把 X 归入 Y 文件夹」、「整理文件」等场景。可以移动文件和目录。目标路径的父目录必须存在。",
     input_schema: {
       type: "object",
       properties: {
@@ -183,7 +181,6 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
       required: ["source", "destination"],
     },
   },
-  // ── 记忆管理工具 ──────────────────────────
   {
     name: "save_memory",
     description:
@@ -254,8 +251,7 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
   {
     name: "delete_path",
     description:
-      "删除文件或目录。如果是目录则递归删除其下所有内容。请谨慎使用！" +
-      "删除前必须确认用户意图。",
+      "删除文件或目录。如果是目录则递归删除其下所有内容。请谨慎使用！删除前必须确认用户意图。",
     input_schema: {
       type: "object",
       properties: {
@@ -265,6 +261,28 @@ export const TOOL_DEFINITIONS: ToolDefinition[] = [
         },
       },
       required: ["target"],
+    },
+  },
+  // 🔍 RAG: 语义记忆检索
+  {
+    name: "search_memories",
+    description:
+      "语义搜索持久化记忆。通过 RAG 向量检索找到与查询最相关的记忆片段。" +
+      "当用户问「我们之前聊过什么」「有没有相关的记忆」「还记得...」时使用。" +
+      "与 recall_memory 不同：recall_memory 需要精确的记忆名称，search_memories 用自然语言语义搜索。",
+    input_schema: {
+      type: "object",
+      properties: {
+        query: {
+          type: "string",
+          description: "要搜索的查询文本（自然语言描述即可）",
+        },
+        topK: {
+          type: "number",
+          description: "返回 top-K 个最相关结果（默认 5）",
+        },
+      },
+      required: ["query"],
     },
   },
 ];
