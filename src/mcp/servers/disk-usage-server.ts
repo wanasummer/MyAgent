@@ -9,10 +9,14 @@
  * 平台支持：
  *   - Windows: 使用 wmic 命令
  *   - macOS/Linux: 使用 df 命令
+ *
+ * 🆕 表格格式化：使用 formatTable() 直接生成 Unicode 框线表格，
+ *   确保中英文混排时严格对齐。LLM 只需透传结果，无需二次格式化。
  */
 
 import * as child_process from "child_process";
 import * as os from "os";
+import { formatTable, type TableColumn } from "../../utils/table-formatter.js";
 
 // ── 类型定义 ──────────────────────────────
 
@@ -70,11 +74,8 @@ function getDiskUsageWindows(): DiskInfo[] {
       const volumeName = parts[4]?.trim();
 
       // 跳过无效盘符
-      if (!caption || caption.includes(":")) {
-        // 继续
-      } else if (!caption) {
-        continue;
-      }
+      if (!caption) continue;
+      if (!caption.includes(":")) continue;
 
       if (size <= 0) continue;
 
@@ -145,33 +146,42 @@ function getDiskUsageUnix(): DiskInfo[] {
 function formatBytes(bytes: number): string {
   if (bytes === 0) return "0 B";
   const units = ["B", "KB", "MB", "GB", "TB"];
-  const i = Math.floor(Math.log(bytes) / Math.log(1024));
-  const size = bytes / Math.pow(1024, i);
-  return `${size.toFixed(2)} ${units[i]}`;
+  const i = Math.min(
+    Math.floor(Math.log(Math.abs(bytes)) / Math.log(1024)),
+    units.length - 1
+  );
+  const value = bytes / Math.pow(1024, i);
+  return value.toFixed(2) + " " + units[i];
 }
 
-// ── JSON-RPC 处理 ─────────────────────────
+// ── JSON-RPC 请求处理 ─────────────────────
 
+/**
+ * 处理 JSON-RPC 请求。
+ *
+ * 🆕 get_disk_usage 现在返回预格式化的 Unicode 框线表格，
+ *   LLM 只需原样展示，无需再自己拼表格。
+ */
 function handleRequest(request: JsonRpcRequest): Record<string, unknown> {
   const { id, method, params } = request;
 
   switch (method) {
+    // ── 握手 ──────────────────────────────
     case "initialize":
       return {
         jsonrpc: "2.0",
         id,
         result: {
           protocolVersion: "2024-11-05",
-          capabilities: {
-            tools: {},
-          },
+          capabilities: { tools: {} },
           serverInfo: {
             name: "disk-usage",
-            version: "1.0.0",
+            version: "1.1.0",
           },
         },
       };
 
+    // ── 工具列表 ──────────────────────────
     case "tools/list":
       return {
         jsonrpc: "2.0",
@@ -181,74 +191,37 @@ function handleRequest(request: JsonRpcRequest): Record<string, unknown> {
             {
               name: "get_disk_usage",
               description:
-                "查询本机所有磁盘分区的占用情况，返回每个磁盘的容量、已用空间、剩余空间、使用率等信息。" +
-                "不需要任何参数。适用于用户询问「磁盘还剩多少空间」「哪个盘满了」等问题。",
+                "查询本机所有磁盘分区的占用情况，返回预格式化的 Unicode 框线表格（已对齐，直接展示即可）。",
               inputSchema: {
                 type: "object",
                 properties: {},
-                required: [],
               },
             },
           ],
         },
       };
 
+    // ── 工具调用 ──────────────────────────
     case "tools/call": {
-      const toolName = params.name as string;
-      const toolArgs = params.arguments as Record<string, unknown> || {};
+      const toolName = params?.name as string;
 
       if (toolName === "get_disk_usage") {
-        const disks = getDiskUsage();
-        const formatted = disks.map((d) => ({
-          盘符: d.mount,
-          卷标: d.volumeName || "—",
-          文件系统: d.filesystem || "—",
-          总容量: formatBytes(d.total),
-          已用: formatBytes(d.used),
-          剩余: formatBytes(d.free),
-          使用率: `${d.usedPercent}%`,
-        }));
-
-        const total = disks.reduce((s, d) => s + d.total, 0);
-        const totalUsed = disks.reduce((s, d) => s + d.used, 0);
-        const totalFree = disks.reduce((s, d) => s + d.free, 0);
-
-        return {
-          jsonrpc: "2.0",
-          id,
-          result: {
-            content: [
-              {
-                type: "text",
-                text: JSON.stringify(
-                  {
-                    磁盘列表: formatted,
-                    汇总: {
-                      总容量: formatBytes(total),
-                      已用: formatBytes(totalUsed),
-                      剩余: formatBytes(totalFree),
-                      总使用率: total > 0 ? `${Math.round((totalUsed / total) * 10000) / 100}%` : "N/A",
-                    },
-                  },
-                  null,
-                  2
-                ),
-              },
-            ],
-            isError: false,
-          },
-        };
+        return handleGetDiskUsage(id);
       }
 
       return {
         jsonrpc: "2.0",
         id,
         result: {
-          content: [{ type: "text", text: JSON.stringify({ error: `未知工具: ${toolName}` }) }],
+          content: [{ type: "text", text: `未知工具: ${toolName}` }],
           isError: true,
         },
       };
     }
+
+    // ── 初始化完成通知（无需响应）─────────
+    case "notifications/initialized":
+      return { jsonrpc: "2.0", id };
 
     default:
       return {
@@ -259,44 +232,118 @@ function handleRequest(request: JsonRpcRequest): Record<string, unknown> {
   }
 }
 
-// ── 主循环 ────────────────────────────────
+/**
+ * 处理 get_disk_usage 工具调用。
+ * 使用 table-formatter 生成完美对齐的 Unicode 框线表格。
+ */
+function handleGetDiskUsage(id: number): Record<string, unknown> {
+  const disks = getDiskUsage();
 
-let buffer = "";
+  // 列定义
+  const columns: TableColumn[] = [
+    { header: "盘符", align: "left" },
+    { header: "卷标", align: "left" },
+    { header: "总容量", align: "right" },
+    { header: "已用", align: "right" },
+    { header: "剩余", align: "right" },
+    { header: "使用率", align: "right" },
+  ];
 
-process.stdin.setEncoding("utf-8");
-process.stdin.on("data", (data: string) => {
-  buffer += data;
+  // 数据行
+  const rows: string[][] = disks.map((d) => [
+    d.mount,
+    d.volumeName || (d.filesystem ? d.filesystem : "—"),
+    formatBytes(d.total),
+    formatBytes(d.used),
+    formatBytes(d.free),
+    d.usedPercent.toFixed(2) + "%",
+  ]);
 
-  // 按换行符分割消息（NDJSON）
-  const lines = buffer.split("\n");
-  buffer = lines.pop() || "";
+  // 汇总行
+  if (disks.length > 1 && disks[0].mount !== "错误") {
+    const total = disks.reduce((s, d) => s + d.total, 0);
+    const totalUsed = disks.reduce((s, d) => s + d.used, 0);
+    const totalFree = disks.reduce((s, d) => s + d.free, 0);
+    const totalPercent =
+      total > 0 ? ((totalUsed / total) * 100).toFixed(2) + "%" : "0%";
 
-  for (const line of lines) {
-    const trimmed = line.trim();
-    if (!trimmed) continue;
-
-    try {
-      const request: JsonRpcRequest = JSON.parse(trimmed);
-      // 跳过通知
-      if (request.id === undefined || request.method === undefined) continue;
-
-      const response = handleRequest(request);
-      process.stdout.write(JSON.stringify(response) + "\n");
-    } catch (err: any) {
-      // JSON 解析错误
-      const errorResponse = {
-        jsonrpc: "2.0",
-        id: null,
-        error: { code: -32700, message: `解析错误: ${err.message}` },
-      };
-      process.stdout.write(JSON.stringify(errorResponse) + "\n");
-    }
+    rows.push([
+      "合计",
+      "",
+      formatBytes(total),
+      formatBytes(totalUsed),
+      formatBytes(totalFree),
+      totalPercent,
+    ]);
   }
-});
 
-// 进程退出处理
-process.on("SIGTERM", () => process.exit(0));
-process.on("SIGINT", () => process.exit(0));
+  // 🎯 使用 formatTable 生成完美对齐的 Unicode 框线表格
+  const tableText = formatTable(columns, rows, "unicode");
 
-// 启动日志
-console.error(`[disk-usage-server] 已启动 (platform: ${os.platform()})`);
+  return {
+    jsonrpc: "2.0",
+    id,
+    result: {
+      content: [
+        {
+          type: "text",
+          text: tableText,
+        },
+      ],
+    },
+  };
+}
+
+// ── 主入口 ────────────────────────────────
+
+/**
+ * MCP stdio 主循环。
+ * 从 stdin 读取 JSON-RPC 请求，处理后写入 stdout。
+ * 使用换行分隔的 JSON (NDJSON) 协议。
+ */
+function main() {
+  const stdin = process.stdin;
+  const stdout = process.stdout;
+
+  let buffer = "";
+
+  stdin.setEncoding("utf-8");
+  stdin.on("data", (chunk: string) => {
+    buffer += chunk;
+
+    // 按换行分割，一次可能收到多条消息
+    const lines = buffer.split("\n");
+    // 最后一行可能不完整，保留到下次
+    buffer = lines.pop() || "";
+
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (!trimmed) continue;
+
+      try {
+        const request: JsonRpcRequest = JSON.parse(trimmed);
+        const response = handleRequest(request);
+
+        // 只有带 id 的请求才需要响应（通知类不需要）
+        if (request.id !== undefined && request.id !== null) {
+          stdout.write(JSON.stringify(response) + "\n");
+        }
+      } catch (err: any) {
+        stdout.write(
+          JSON.stringify({
+            jsonrpc: "2.0",
+            id: null,
+            error: { code: -32700, message: `解析错误: ${err.message}` },
+          }) + "\n"
+        );
+      }
+    }
+  });
+
+  stdin.on("end", () => {
+    // stdin 关闭，正常退出
+    process.exit(0);
+  });
+}
+
+main();
