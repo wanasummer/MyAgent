@@ -19,7 +19,7 @@ import { TOOL_DEFINITIONS } from "./tool-definitions";
 import { executeTool } from "../tool-executor";
 import { formatMemoryContext } from "../memory/memory-store";
 
-const MAX_TURNS = 10;
+const MAX_TURNS = 20;
 
 /**
  * 构建运行时上下文，注入到系统提示词中。
