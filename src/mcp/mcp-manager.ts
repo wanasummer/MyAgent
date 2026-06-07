@@ -12,7 +12,7 @@
 
 import { McpClient, McpToolDefinition, buildServerCommand } from "./mcp-client";
 import * as path from "path";
-import * as os from "os";
+import * as fs from "fs";
 
 // ── 类型 ──────────────────────────────────
 
@@ -41,14 +41,13 @@ interface ServerConfig {
 // ── 默认配置 ──────────────────────────────
 
 function getDefaultServers(): ServerConfig[] {
-  const projectDir = process.cwd();
-  const diskServerPath = path.join(
-    projectDir,
-    "src",
-    "mcp",
-    "servers",
-    "disk-usage-server.ts"
+  // 使用 __dirname 基于当前模块位置解析 server 路径
+  // 编译后 __dirname 为 dist/mcp/，server 在 dist/mcp/servers/
+  // 开发时 (ts-node) __dirname 为 src/mcp/，server 在 src/mcp/servers/
+  const diskServerPath = resolveServerPath(
+    path.join(__dirname, "servers", "disk-usage-server")
   );
+
   const { command, args } = buildServerCommand(diskServerPath);
 
   return [
@@ -61,7 +60,40 @@ function getDefaultServers(): ServerConfig[] {
   ];
 }
 
+/**
+ * 解析 server 文件路径：优先 .js（生产），回退 .ts（开发）。
+ * 使用同步 fs.accessSync 检查文件可访问性。
+ */
+function resolveServerPath(basePath: string): string {
+  const candidates = [
+    basePath + ".js",
+    basePath + ".ts",
+    basePath, // 如果已经包含扩展名
+  ];
+
+  for (const p of candidates) {
+    try {
+      fs.accessSync(p, fs.constants.R_OK);
+      return p;
+    } catch {
+      // 不可访问，尝试下一个
+    }
+  }
+
+  // 回退：返回 .js 路径（生产环境默认）
+  return basePath + ".js";
+}
+
 // ── MCP Manager ───────────────────────────
+
+let _instance: McpManager | null = null;
+
+export function getMcpManager(): McpManager {
+  if (!_instance) {
+    _instance = new McpManager();
+  }
+  return _instance;
+}
 
 export class McpManager {
   private clients = new Map<string, McpClient>();
@@ -150,17 +182,7 @@ export class McpManager {
 
     console.log(
       `  📦 [MCP:${cfg.key}] 注册了 ${tools.length} 个工具: ` +
-        tools.map((t) => t.name).join(", ")
+        tools.map((t) => `mcp__${cfg.key}__${t.name}`).join(", ")
     );
   }
-}
-
-/** 单例 */
-let instance: McpManager | null = null;
-
-export function getMcpManager(): McpManager {
-  if (!instance) {
-    instance = new McpManager();
-  }
-  return instance;
 }
