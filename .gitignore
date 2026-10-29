@@ -1,0 +1,32 @@
+# Common Lisp 编译产物（仅限项目自身；bin/ 内的运行时 .fasl 必须保留）
+*.fasl
+*.lx64fsl
+*.wx64fsl
+
+# 环境变量（含 API Key）
+.env
+.env.local
+
+# 本地私有配置（含 API Key）
+.myagent/
+
+# 个人记忆数据：不随仓库分发（保留说明文件）
+/memory/*.md
+!/memory/README.md
+
+# 热重载失败时的临时转储
+*.lisp.failed
+
+# 系统文件
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 内置 SBCL 运行时整体入库（含 contrib/*.fasl）
+!/bin/**

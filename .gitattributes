@@ -1,0 +1,11 @@
+# 二进制文件：禁止行尾转换与文本 diff，避免 core/exe 被破坏
+bin/** binary
+*.core binary
+*.exe binary
+*.fasl binary
+
+# 脚本换行风格
+*.bat text eol=crlf
+*.sh  text eol=lf
+*.lisp text eol=lf
+*.md   text eol=lf
