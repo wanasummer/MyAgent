@@ -18,14 +18,17 @@
 (defparameter *startup-modules*
   '("lisp/json.lisp"
     "lisp/config.lisp"
+    "lisp/ui.lisp"
     "lisp/file-utils.lisp"
     "lisp/markdown.lisp"
     "lisp/llm-client.lisp"
+    "lisp/cancel.lisp"
     ;; 安全热重载引擎必须在 tools.lisp 之前加载：
     ;; 这样即使 tools.lisp 被改坏，回滚引擎依然可用。
     "lisp/reload-engine.lisp"
     "lisp/tools.lisp"
     "lisp/agent-loop.lisp"
+    "lisp/context-manager.lisp"
     "lisp/cli.lisp")
   "启动时按顺序加载的核心模块。")
 
@@ -60,13 +63,15 @@
        (let* ((prompt (nth (1+ prompt-pos) args))
               (res (run-agent prompt nil)))
          (format t "~%Agent >~%~A~%" (getf res :answer))
+         (when (fboundp 'ctx-status-print)
+           (funcall 'ctx-status-print (getf res :history)))
          :ok))
       (t
        (start-cli)))))
 
 (defun report-fatal-error (e)
   "以可读方式报告致命错误，避免直接掉进裸调试器且窗口一闪而过。"
-  (format *error-output* "~%❌ MyAgent 异常终止：~A~%" e)
+  (format *error-output* "~%[X] MyAgent 异常终止：~A~%" e)
   (ignore-errors (sb-debug:print-backtrace :count 20 :stream *error-output*))
   (finish-output *error-output*)
   (finish-output))
@@ -75,7 +80,7 @@
 ;;; 如果本文件被 write_file / hot-reload 加载进正在运行的镜像，则自动跳过，
 ;;; 避免误触 (main) 或 (uiop:quit) 把当前运行的 Agent 进程杀掉。
 (if (and (fboundp 'run-agent) (boundp '*tool-registry*))
-    (format t "  ℹ️ run.lisp 已在运行中的镜像内加载，跳过启动流程。~%")
+    (format t "  ~A run.lisp 已在运行中的镜像内加载，跳过启动流程。~%" (ui-tag-info "提示"))
     (let ((result nil))
       (handler-case
           (progn

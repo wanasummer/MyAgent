@@ -3,8 +3,8 @@
 
 (in-package :cl-user)
 
-(defparameter *max-turns* 40
-  "单次对话最大 ReAct 推理轮数。")
+(defparameter *max-turns* nil
+  "单次对话最大 ReAct 推理轮数；nil 表示不设上限（默认）。设为整数则在该轮数后停止。")
 
 (defparameter *max-empty-answer-retries* 1
   "模型返回「无文本内容」时，自动请求其补充回答的最大次数（只重试 1 次，节省轮数）。")
@@ -16,7 +16,7 @@
   "你是一个基于原生 Common Lisp (SBCL) 构建的本地文件管理与自我演化 Agent。
 你可以使用提供的工具来操控本机文件系统，并利用 Lisp 的动态热重载与求值能力在对话中直接迭代自身的核心功能。
 
-## 🔥 Lisp 实时自我迭代机制（免重启）
+## Lisp 实时自我迭代机制（免重启）
 
 你的全部核心代码运行在单个常驻 SBCL 进程镜像中，源码位于项目的 `lisp/` 目录下：
 - `lisp/reload-engine.lisp` — 安全热重载引擎（快照 / 自动回滚 / 错误回传）
@@ -38,7 +38,7 @@
 1. **思考 (Thought)**：分析用户意图，判断是否需要查看目录/文件或执行 Lisp 热更新。
 2. **行动 (Action)**：调用合适的工具（文件工具、`eval_lisp`、`reload_lisp`）。
 3. **观察 (Observation)**：分析工具返回结果。
-4. **回答 (Answer)**：信息足够或操作完成后，用中文给出清晰完整的最终答案（以 ✅ 开头）。
+4. **回答 (Answer)**：信息足够或操作完成后，用中文给出清晰完整的最终答案（结论先行，不要使用 emoji）。
 
 ## 行为准则
 
@@ -46,6 +46,8 @@
 - **路径使用**：支持绝对路径、相对路径和 `~`（自动展开为用户主目录）。
 - **安全第一**：执行 `delete_path` 前务必确认用户意图。
 - **中文交流**：始终用清晰简洁的中文与用户沟通。
+- **禁止 emoji**：回答、日志与生成的文件内容中一律不要使用 emoji 或装饰性符号；需要强调时改用 Markdown 加粗、列表，或纯文本标签 [OK] / [WARN] / [ERR]。
+- **结论先行**：开头用一句中文结论概括结果（如「已完成：…」），再展开细节。
 - **禁止空回答**：每轮结束若不再调用工具，必须输出非空的最终文本答案。"
   "静态系统提示词（保持前缀一致以命中 Anthropic Prompt Cache）。")
 
@@ -144,7 +146,7 @@
   (when (fboundp 'check-and-hot-reload-modified-files)
     (handler-case (funcall 'check-and-hot-reload-modified-files)
       (serious-condition (e)
-        (format *error-output* "  ⚠️ 热重载检查异常（已忽略）: ~A~%" e))))
+        (format *error-output* "  [!] 热重载检查异常（已忽略）: ~A~%" e))))
   nil)
 
 (defun reload-error-note ()
@@ -152,7 +154,7 @@
   (when (fboundp 'drain-lisp-reload-errors)
     (let ((errs (ignore-errors (funcall 'drain-lisp-reload-errors))))
       (when errs
-        (format nil "<system-reminder>~%## 🔁 Lisp 热重载失败（已自动回滚，任务继续）~%~{~A~%~}~%以上文件已被自动回滚到「上一个可用版本」，工具与核心函数仍在正常工作。请阅读错误、修复源码，然后用 write_file 重新写入。~%</system-reminder>"
+        (format nil "<system-reminder>~%## Lisp 热重载失败（已自动回滚，任务继续）~%~{~A~%~}~%以上文件已被自动回滚到「上一个可用版本」，工具与核心函数仍在正常工作。请阅读错误、修复源码，然后用 write_file 重新写入。~%</system-reminder>"
                 errs)))))
 
 (defun tool-result-block-p (block)
@@ -243,148 +245,329 @@
                        (let ((synthetic (mapcar (lambda (id)
                                                   (jobj "type" "tool_result"
                                                         "tool_use_id" id
-                                                        "content" "⚠️ 此工具调用未完成（会话中断/恢复）。请忽略并继续。"))
+                                                        "content" "[警告] 此工具调用未完成（会话中断/恢复）。请忽略并继续。"))
                                                 missing)))
-                         (format t "  🔧 修复了 ~D 个缺失的 tool_result~%" (length missing))
+                         (format t "~A 修复了 ~D 个缺失的 tool_result~%" (ui-tag-warn "警告") (length missing))
                          (push (jobj "role" "user" "content" synthetic) out))))))))
     (nreverse out)))
 
+;;; ── 控制台日志（CMD 友好：不使用 emoji） ─────────────
+
+(defparameter *log-rule-width* 40
+  "分隔线宽度。")
+
+(defun log-line (fmt &rest args)
+  "输出一行日志并立即刷新。"
+  (apply #'format t fmt args)
+  (finish-output))
+
+(defun log-rule ()
+  (make-string *log-rule-width* :initial-element #\─))
+
+(defun log-clip (s maxlen)
+  "截断过长文本，避免刷屏。"
+  (let ((s (or s "")))
+    (if (> (length s) maxlen)
+        (concatenate 'string (subseq s 0 maxlen) "…")
+        s)))
+
+(defun format-tool-args-line (args-ht)
+  "把工具参数整理成 `键=值  键=值` 的单行摘要。"
+  (if (not (hash-table-p args-ht))
+      ""
+      (let ((pairs '()))
+        (maphash (lambda (k v)
+                   (push (format nil "~A=~A" k
+                                 (cond
+                                   ((stringp v)
+                                    (log-clip (substitute #\Space #\Newline v) 38))
+                                   ((eq v t) "true")
+                                   ((eq v :false) "false")
+                                   (t (princ-to-string v))))
+                         pairs))
+                 args-ht)
+        (format nil "~{~A~^  ~}" (nreverse pairs)))))
+
+(defparameter *tool-result-max-chars* 6000
+  "单条工具结果进入上下文的最大字符数，超出则截断，避免历史膨胀拖慢每一轮。")
+
+(defun clip-tool-result (s &optional tool-name)
+  "工具结果写入上下文时定型：小结果原样保留，大结果 head + omit + tail。
+   在写入历史时就裁剪（而非每次请求时改写），保证历史追加式、前缀稳定。"
+  (if (fboundp 'elide-tool-result)
+      (funcall 'elide-tool-result s tool-name)
+      s))
+
 ;;; ── 工具执行 ─────────────────────────────────────────
 
-(defun execute-tool-use-block (tool-use)
-  "执行单个 tool_use 块，返回对应的 tool_result 块。任何异常都被捕获为可读错误结果。"
+(defun execute-tool-use-block (tool-use &optional turn)
+  "执行单个 tool_use 块，返回对应的 tool_result 块；同时打印简洁的执行日志。"
   (let* ((t-id (or (jget tool-use "id") (format nil "toolu_~D" (get-universal-time))))
-         (t-name (jget tool-use "name"))
+         (t-name (or (jget tool-use "name") "(unknown)"))
          (t-input (let ((in (jget tool-use "input")))
-                    (if (hash-table-p in) in (jobj)))))
-    (format t "  🔧 调用工具: ~A(~A)~%" t-name (format-args-for-log t-input))
-    (finish-output)
+                    (if (hash-table-p in) in (jobj))))
+         (args-line (format-tool-args-line t-input))
+         (start (get-internal-real-time)))
+    (log-line "~A ~A ~A~@[ ~A~]~%"
+              (ui-dim (format nil "[~2,'0D]" (or turn 0)))
+              (ui-dim ">")
+              (ui-colorize "1;36" t-name)
+              (if (zerop (length args-line)) nil (ui-dim args-line)))
     (handler-case
         ;; 通过符号 funcall 调用 execute-tool，确保热更新后立即走新逻辑
         (let* ((res (funcall 'execute-tool t-name t-input))
-               (res-str (if (stringp res) res (json-encode res))))
+               (res-str (if (stringp res) res (json-encode res)))
+               (ms (round (* 1000 (/ (- (get-internal-real-time) start)
+                                     internal-time-units-per-second))))
+               (head (let* ((trimmed (string-left-trim '(#\Space #\Tab #\Return #\Newline) res-str))
+                            (json-p (and (> (length trimmed) 0)
+                                         (member (char trimmed 0) '(#\{ #\[)))))
+                       (unless json-p
+                         (let ((nl (position #\Newline trimmed)))
+                           (log-clip (if nl (subseq trimmed 0 nl) trimmed) 40))))))
+          (if head
+              (log-line "    ~A ~A~%" (ui-dim "<")
+                        (ui-dim (format nil "~A 字符 · ~D ms · ~A" (length res-str) ms head)))
+              (log-line "    ~A ~A~%" (ui-dim "<")
+                        (ui-dim (format nil "~A 字符 · ~D ms" (length res-str) ms))))
           (jobj "type" "tool_result"
                 "tool_use_id" t-id
-                "content" res-str))
+                "content" (clip-tool-result res-str t-name)))
       (error (e)
-        (jobj "type" "tool_result"
-              "tool_use_id" t-id
-              "content" (format nil "❌ 工具执行失败: ~A" e))))))
+        (let ((ms (round (* 1000 (/ (- (get-internal-real-time) start)
+                                    internal-time-units-per-second)))))
+          (log-line "    ~A ~D ms · ~A~%" (ui-tag-err "失败") ms e)
+          (jobj "type" "tool_result"
+                "tool_use_id" t-id
+                "content" (format nil "工具执行失败: ~A" e)))))))
+
+;;; ── ESC 中断与 Agent 主循环 ─────────────────────────
+
+(defun agent-cancelled-p ()
+  "是否已收到用户中断请求（cancel 模块未加载时恒为 nil）。"
+  (and (fboundp 'agent-cancel-requested-p)
+       (ignore-errors (funcall 'agent-cancel-requested-p))))
+
+(defun cancel-support-available-p ()
+  "当前是否具备「按 ESC 中断执行中任务」的能力。"
+  (and (fboundp 'interactive-cancel-available-p)
+       (ignore-errors (funcall 'interactive-cancel-available-p))))
+
+(defun call-llm-with-cancel (thunk)
+  "调用模型；具备中断能力时把请求放到后台线程，主线程轮询 ESC。
+返回 (values 响应 :done) 或 (values nil :cancelled)。"
+  (if (fboundp 'call-with-cancel-polling)
+      (funcall 'call-with-cancel-polling thunk)
+      (values (funcall thunk) :done)))
+
+(defun make-cancelled-tool-result (tool-use)
+  "中断后为未执行的 tool_use 生成占位 tool_result，保持调用链配对完整。"
+  (jobj "type" "tool_result"
+        "tool_use_id" (or (jget tool-use "id") "toolu_cancelled")
+        "is_error" t
+        "content" "[已中断] 用户按 ESC 中止了本次任务，此工具未执行。"))
+
+(defun ensure-trailing-assistant (messages)
+  "中断后若最后一条消息不是 assistant，补一条说明，避免出现连续两条 user 消息。"
+  (let ((last (car (last messages))))
+    (if (or (null last)
+            (and (hash-table-p last) (equal (jget last "role") "assistant")))
+        messages
+        (append messages
+                (list (jobj "role" "assistant"
+                            "content" (list (jobj "type" "text"
+                                                  "text" "（本次任务已被用户中断，未完成。）"))))))))
+
+(defun make-cancelled-result (messages in-tokens out-tokens turns tool-calls)
+  "构造「已中断」的返回值：完整保留已经产生的上下文调用链。"
+  (let ((msgs (ensure-trailing-assistant messages)))
+    (list :answer (format nil "已中断（第 ~D 轮，已完成 ~D 次工具调用）。上下文已保留 ~D 条消息，可直接继续提问。"
+                          turns tool-calls (length msgs))
+          :history msgs
+          :input-tokens in-tokens
+          :output-tokens out-tokens
+          :cancelled t)))
 
 ;;; ── Agent 主循环 ─────────────────────────────────────
 
 (defun run-agent (user-input &optional history)
   "执行一次完整的 ReAct Agent 对话循环。
-返回 plist: (:answer string :history list :input-tokens int :output-tokens int)"
-  ;; 🔥 每次对话开始前检查是否有外部编辑过的 .lisp 文件，自动热重载
+返回 plist: (:answer string :history list :input-tokens int :output-tokens int [:cancelled t])
+
+执行期间用户按 ESC 会中断当前任务：
+- 已经完成的轮次（assistant 回复 + tool_result）全部保留在 :history 里；
+- 未执行完的 tool_use 会补一条「已中断」的 tool_result，保证调用链结构合法；
+- 返回 :cancelled t，CLI 端据此给出提示但不清空会话历史。"
   (when *auto-reload-before-turn* (safe-check-and-hot-reload))
 
-  (let* ((env-ctx (build-environment-context))
-         (enriched-input (format nil "~A~%~%---~%~%~A" env-ctx user-input))
-         (messages (fix-missing-tool-results
-                    (append (copy-list history)
-                            (list (jobj "role" "user" "content" enriched-input)))))
-         (turns 0)
-         (empty-retries 0)
-         (total-in-tokens 0)
-         (total-out-tokens 0))
+  (when (fboundp 'reset-ctx-run-stats) (reset-ctx-run-stats))
+  (when (fboundp 'reset-cancel-state) (funcall 'reset-cancel-state))
 
-    (loop while (< turns *max-turns*)
-          do (incf turns)
-             ;; 🔥 每轮推理前检查是否有热重载更新，并动态拉取最新工具表！
-             (when *auto-reload-before-turn* (safe-check-and-hot-reload))
+  ;; CLI 交互模式下：先把用户消息以醒目样式回显到历史里，便于滚动时定位。
+  ;; 放在 run-agent（而不是 start-cli）是为了热重载后立即生效：
+  ;; start-cli 的主循环是已编译代码，新增调用要重启才生效。
+  (when (and (fboundp 'cli-echo-user-message)
+             (boundp '*raw-console-active*)
+             (symbol-value '*raw-console-active*))
+    (ignore-errors (funcall 'cli-echo-user-message user-input)))
 
-             ;; 🔁 若有热重载失败（自动回滚已完成），把错误注入给 LLM 后继续
-             (let ((note (and *auto-reload-before-turn* (reload-error-note))))
-               (when note
-                 (setf messages (inject-note-into-message-flow messages note))))
+  (let ((*agent-busy* t))
+    (let* ((env-ctx (build-environment-context))
+           (enriched-input (format nil "~A~%~%---~%~%~A" env-ctx user-input))
+           (messages (fix-missing-tool-results
+                      (append (copy-list history)
+                              (list (jobj "role" "user" "content" enriched-input)))))
+           (turns 0)
+           (tool-calls 0)
+           (empty-retries 0)
+           (total-in-tokens 0)
+           (total-out-tokens 0))
 
-             (let* ((all-tools (get-all-tool-definitions))
-                    (response (chat-with-tools
-                               :system *system-prompt*
-                               :messages messages
-                               :tools all-tools))
-                    (usage (jget response "usage"))
-                    (in-tok (if (hash-table-p usage) (or (jget usage "input_tokens") 0) 0))
-                    (out-tok (if (hash-table-p usage) (or (jget usage "output_tokens") 0) 0))
-                    (stop-reason (let ((sr (jget response "stop_reason")))
-                                   (if (stringp sr) sr "end_turn")))
-                    (content (content-as-blocks (jget response "content")))
-                    (tool-uses (remove-if-not
-                                (lambda (b) (equal (block-type b) "tool_use"))
-                                content)))
+      (when (cancel-support-available-p)
+        (log-line "~A 执行中按 ESC 可中断本次任务，已产生的上下文会保留~%~%"
+                  (ui-dim "提示")))
 
-               (incf total-in-tokens in-tok)
-               (incf total-out-tokens out-tok)
+      (loop while (or (null *max-turns*) (< turns *max-turns*))
+            do (incf turns)
+               (when (fboundp 'poll-user-cancel) (funcall 'poll-user-cancel))
+               (when *auto-reload-before-turn* (safe-check-and-hot-reload))
+               (let ((note (reload-error-note)))
+                 (when note
+                   (setf messages (inject-note-into-message-flow messages note))))
 
-               (setf messages (append messages (list (jobj "role" "assistant" "content" content))))
+               (setf messages (compact-history-if-needed messages turns))
 
-               (format t "  🔄 Turn ~D | stop_reason=~A | tools=~D | blocks=[~A] | tokens: +~D in / +~D out~%"
-                       turns stop-reason (length tool-uses)
-                       (describe-content-blocks content) in-tok out-tok)
-               (finish-output)
+               (let* ((req-start (get-internal-real-time))
+                      (all-tools (get-all-tool-definitions)))
+                 (multiple-value-bind (response call-status)
+                     (labels ((invoke-llm ()
+                                (call-llm-with-cancel
+                                 (lambda ()
+                                   (funcall 'chat-with-tools
+                                            :system *system-prompt*
+                                            :messages messages
+                                            :tools all-tools)))))
+                       (handler-case
+                           (invoke-llm)
+                         (error (e)
+                           ;; 若本轮存在刚热重载但尚未通过通信验证的代码，运行期报错时立即自动回滚并重试一次
+                           (if (and (fboundp 'unverified-lisp-backups-p)
+                                    (funcall 'unverified-lisp-backups-p)
+                                    (fboundp 'rollback-unverified-lisp-files))
+                               (progn
+                                 (funcall 'rollback-unverified-lisp-files e)
+                                 (let ((heal-note (reload-error-note)))
+                                   (when heal-note
+                                     (setf messages (inject-note-into-message-flow messages heal-note))))
+                                 (setf all-tools (funcall 'get-all-tool-definitions))
+                                 (invoke-llm))
+                               (error e)))))
+                   (when (eq call-status :cancelled)
+                     (log-line "~%~A 第 ~D 轮请求已中断，上下文已保留~%"
+                               (ui-tag-warn "中断") turns)
+                     (return-from run-agent
+                       (make-cancelled-result messages total-in-tokens total-out-tokens
+                                              turns tool-calls)))
+                   ;; LLM 请求成功返回 → 确认此前热重载的代码未破坏核心通信链路
+                   (when (fboundp 'commit-verified-lisp-backups)
+                     (ignore-errors (funcall 'commit-verified-lisp-backups)))
+                   (let* ((usage (jget response "usage"))
+                          (in-tok (if (hash-table-p usage) (or (jget usage "input_tokens") 0) 0))
+                          (out-tok (if (hash-table-p usage) (or (jget usage "output_tokens") 0) 0))
+                          (stop-reason (let ((sr (jget response "stop_reason")))
+                                         (if (stringp sr) sr "end_turn")))
+                          (content (content-as-blocks (jget response "content")))
+                          (tool-uses (remove-if-not
+                                      (lambda (b) (equal (block-type b) "tool_use"))
+                                      content)))
 
-               (cond
-                 ;; ① 存在 tool_use → 无论 stop_reason 是什么都执行，绝不静默丢弃工具调用
-                 (tool-uses
-                  (when (and (not (equal stop-reason "tool_use"))
-                             (not (equal stop-reason "max_tokens")))
-                    (format t "  ⚠️ stop_reason=~A 但响应含 ~D 个 tool_use，仍按工具调用处理。~%"
-                            stop-reason (length tool-uses))
-                    (finish-output))
-                  (let ((tool-results nil))
-                    (dolist (tc tool-uses)
-                      (push (execute-tool-use-block tc) tool-results))
-                    (setf messages
-                          (append messages
-                                  (list (jobj "role" "user"
-                                              "content" (nreverse tool-results)))))))
+                     (log-line "~A 第 ~D 轮 · 模型 ~D ms · 上下文 ~D 条~%"
+                               (ui-dim "·") turns
+                               (round (* 1000 (/ (- (get-internal-real-time) req-start)
+                                                 internal-time-units-per-second)))
+                               (length messages))
+                     (incf total-in-tokens in-tok)
+                     (when (fboundp 'log-context-usage)
+                       (log-context-usage usage messages turns))
+                     (incf total-out-tokens out-tok)
+                     (setf messages (append messages (list (jobj "role" "assistant" "content" content))))
 
-                 ;; ② 无工具调用 → 提取文本答案
-                 (t
-                  (let ((answer (collect-answer-text content)))
-                    (cond
-                      ;; 正常回答
-                      ((> (length answer) 0)
-                       (let ((total-tok (+ total-in-tokens total-out-tokens)))
-                         (format t "  ✅ 回答 (~D 字符) | 共 ~D tokens (in: ~D / out: ~D)~%"
-                                 (length answer) total-tok total-in-tokens total-out-tokens)
-                         (finish-output)
-                         (return-from run-agent
-                           (list :answer answer
-                                 :history messages
-                                 :input-tokens total-in-tokens
-                                 :output-tokens total-out-tokens))))
+                     (cond
+                       ;; ① 存在 tool_use → 无论 stop_reason 是什么都执行
+                       (tool-uses
+                        (log-line "~A 第 ~D 轮 ~A~%"
+                                  (ui-colorize "1;36" "──") turns (ui-dim (log-rule)))
+                        (when (and (not (equal stop-reason "tool_use"))
+                                   (not (equal stop-reason "max_tokens")))
+                          (log-line "    (stop_reason=~A，按工具调用处理)~%" stop-reason))
+                        (let ((tool-results nil))
+                          (dolist (tc tool-uses)
+                            (incf tool-calls)
+                            (when (fboundp 'poll-user-cancel) (funcall 'poll-user-cancel))
+                            (push (if (agent-cancelled-p)
+                                      (make-cancelled-tool-result tc)
+                                      (execute-tool-use-block tc turns))
+                                  tool-results))
+                          (setf messages
+                                (append messages
+                                        (list (jobj "role" "user"
+                                                    "content" (nreverse tool-results))))))
+                        ;; 工具执行期间按 ESC → 立刻收尾返回，保留已完成的调用链
+                        (when (fboundp 'poll-user-cancel) (funcall 'poll-user-cancel))
+                        (when (agent-cancelled-p)
+                          (log-line "~%~A 工具执行已中断，上下文已保留~%"
+                                    (ui-tag-warn "中断"))
+                          (return-from run-agent
+                            (make-cancelled-result messages total-in-tokens total-out-tokens
+                                                   turns tool-calls))))
 
-                      ;; 空回答 → 自动追问模型补充（有限次）
-                      ((< empty-retries *max-empty-answer-retries*)
-                       (incf empty-retries)
-                       (format t "  ⚠️ 本轮回答为空（stop_reason=~A, blocks=[~A]），自动请求模型补充文本 (~D/~D)~%"
-                               stop-reason (describe-content-blocks content)
-                               empty-retries *max-empty-answer-retries*)
-                       (finish-output)
-                       (setf messages (append messages (list (make-continue-nudge stop-reason)))))
+                       ;; ② 无工具调用 → 提取文本答案
+                       (t
+                        (let ((answer (collect-answer-text content)))
+                          (cond
+                            ;; 正常回答
+                            ((> (length answer) 0)
+                             (let ((total-tok (+ total-in-tokens total-out-tokens)))
+                               (log-line "~%~A 回答 ~D 字符 · ~D 轮 · ~D 次工具调用 · 共 ~D tokens (in ~D / out ~D)~%"
+                                         (ui-tag-ok "完成")
+                                         (length answer) turns tool-calls total-tok
+                                         total-in-tokens total-out-tokens)
+                               (return-from run-agent
+                                 (list :answer answer
+                                       :history messages
+                                       :input-tokens total-in-tokens
+                                       :output-tokens total-out-tokens))))
 
-                      ;; 仍为空 → 返回可读诊断，避免把空串当最终答案
-                      (t
-                       (let ((diagnostic
-                               (format nil "⚠️ 模型在本轮未返回任何文本内容（stop_reason=~A，content blocks=[~A]）。可能原因：输出被截断、模型只返回了思考/工具块、或服务端响应异常。建议重试本次提问；若持续出现，可用 /reload 检查配置或 /model 重新确认 Key。"
-                                       stop-reason (describe-content-blocks content))))
-                         (format t "  ⚠️ ~A~%" diagnostic)
-                         (finish-output)
-                         (return-from run-agent
-                           (list :answer diagnostic
-                                 :history messages
-                                 :input-tokens total-in-tokens
-                                 :output-tokens total-out-tokens))))))))))
+                            ;; 空回答 → 自动追问（有限次）
+                            ((< empty-retries *max-empty-answer-retries*)
+                             (incf empty-retries)
+                             (log-line "~A 本轮无文本输出 (blocks=~A)，自动追问 ~D/~D~%"
+                                       (ui-tag-warn "警告")
+                                       (describe-content-blocks content)
+                                       empty-retries *max-empty-answer-retries*)
+                             (setf messages (append messages (list (make-continue-nudge stop-reason)))))
 
-    ;; 超过最大轮数
+                            ;; 仍为空 → 返回可读诊断
+                            (t
+                             (let ((diagnostic
+                                     (format nil "模型在本轮未返回任何文本内容（stop_reason=~A，content blocks=[~A]）。可能原因：输出被截断、模型只返回了思考/工具块、或服务端响应异常。建议重试本次提问；若持续出现，可用 /reload 检查配置或 /model 重新确认 Key。"
+                                             stop-reason (describe-content-blocks content))))
+                               (log-line "~A ~A~%" (ui-tag-warn "警告") diagnostic)
+                               (return-from run-agent
+                                 (list :answer diagnostic
+                                       :history messages
+                                       :input-tokens total-in-tokens
+                                       :output-tokens total-out-tokens))))))))))))
+
+    ;; 只有在 *max-turns* 为整数且已耗尽时才会走到这里
     (let ((last-text (collect-answer-text
                       (let ((last-msg (car (last messages))))
                         (and (hash-table-p last-msg) (jget last-msg "content"))))))
       (list :answer (if (> (length last-text) 0)
                         last-text
-                        "⚠️ 达到最大轮数限制，已停止思考。")
+                        (format nil "已达设定的轮数上限（~D 轮，累计 ~D 次工具调用），任务尚未收敛；可用 /turns off 取消上限后继续。"
+                                *max-turns* tool-calls))
             :history messages
             :input-tokens total-in-tokens
             :output-tokens total-out-tokens))))
+)

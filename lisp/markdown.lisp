@@ -4,7 +4,7 @@
 ;;;; 特性：
 ;;;;   1. 标题 / 列表 / 引用 / 代码块 / 行内样式
 ;;;;   2. 表格：按【显示宽度】对齐（中文=2 列、emoji=2 列），带边框
-;;;;   3. CMD / GBK 等不支持 emoji 的终端：键帽数字(5️⃣)、变体选择符、emoji 自动降级为纯文本
+;;;;   3. CMD / GBK 等不支持 emoji 的终端：键帽数字、变体选择符、emoji 统一转成彩色文本标签
 
 (in-package :cl-user)
 
@@ -12,7 +12,10 @@
   "Markdown 颜色模式：:auto 自动检测终端 / t 强制开启 / nil 关闭。")
 
 (defparameter *md-emoji-mode* :auto
-  "emoji 降级模式：:auto 在 CMD/GBK 终端下降级为 ASCII / t 总是降级 / nil 保留原样。")
+  "emoji 处理：:auto 与 t 一律转成彩色文本标签（默认不显示 emoji）；nil 保留原样。")
+
+(defparameter *md-code-inline-style* "33"
+  "行内代码的 ANSI 样式：默认黄色前景、不填充背景，避免整段代码块变蓝。")
 
 (defparameter *md-esc* (string (code-char 27))
   "ANSI 转义字符 ESC。")
@@ -20,16 +23,34 @@
 ;;; ── ANSI 基础 ──────────────────────────────────────────────
 
 (defun md-color-on-p ()
-  "判断是否启用 ANSI 颜色。"
+  "判断是否启用 ANSI 颜色（复用 ui.lisp 的终端检测，支持 Windows CMD 自动开启 VT）。"
   (cond
-    ((eq *md-color-mode* t) t)
     ((null *md-color-mode*) nil)
+    ((eq *md-color-mode* t) t)
+    ((fboundp 'ui-color-on-p) (funcall 'ui-color-on-p))
     (t (and (null (uiop:getenv "NO_COLOR"))
             (or (uiop:getenv "WT_SESSION")
                 (uiop:getenv "TERM")
                 (uiop:getenv "COLORTERM")
-                (uiop:getenv "ConEmuANSI")
-                (not (uiop:getenv "OS")))))))
+                (uiop:getenv "ConEmuANSI"))))))
+
+(defun md-ascii-word-p (c)
+  "ASCII 字母/数字判定（中文等宽字符不算词内字符）。"
+  (let ((code (char-code c)))
+    (or (<= 48 code 57) (<= 65 code 90) (<= 97 code 122))))
+
+(defun md-lisp-symbol-p (s)
+  "判断文本是否像 Lisp 标识符（earmuff 变量、my-func-name 等）。
+  此类文本在 * 或 _ 强调解析时保持字面量，避免星号被当作斜体标记吞掉。"
+  (and (plusp (length s))
+       (<= (length s) 64)
+       (let ((has-sep nil) (ok t))
+         (loop for c across s
+               do (cond ((or (md-ascii-word-p c) (char= c #\*)) nil)
+                        ((find c "-_+/=<>!?.") (when (or (char= c #\-) (char= c #\_))
+                                                  (setf has-sep t)))
+                        (t (setf ok nil) (return))))
+         (and ok has-sep))))
 
 (defun md-wrap (code text)
   (if (md-color-on-p)
@@ -48,28 +69,33 @@
 
 ;;; ── 纯文本降级：emoji / 键帽数字 / 变体选择符 ─────────────
 
-(defparameter *md-emoji-ascii*
-  '(("✅" . "[OK]") ("✔" . "[OK]") ("☑" . "[OK]")
-    ("❌" . "[X]") ("✘" . "[X]") ("❎" . "[X]")
-    ("⚠" . "[!]") ("❗" . "[!]") ("❓" . "[?]") ("❔" . "[?]")
-    ("🔥" . "[*]") ("⭐" . "*") ("✨" . "*") ("💡" . "[i]")
-    ("🔁" . "[~]") ("🔄" . "[~]") ("🔧" . "[T]") ("⚙" . "[C]")
-    ("📄" . "[F]") ("📁" . "[D]") ("📂" . "[D]") ("🗑" . "[DEL]")
-    ("📌" . "[*]") ("📝" . "[N]") ("🧪" . "[T]") ("🚀" . ">>")
-    ("👉" . "->") ("⏳" . "[..]") ("🎉" . "[OK]") ("👋" . "[BYE]")
-    ("🛠" . "[T]") ("🔍" . "[?]") ("📦" . "[P]") ("🌟" . "*")
-    ("🧠" . "[i]") ("🎨" . "[C]") ("🧹" . "[DEL]") ("📖" . "[DOC]"))
-  "常见 emoji → ASCII 文本映射（CMD / GBK 终端下使用）。")
+(defparameter *md-emoji-tags*
+  '(("✅" "成功" "1;32") ("✔" "成功" "1;32") ("☑" "成功" "1;32") ("✓" "成功" "1;32")
+    ("❌" "失败" "1;31") ("✘" "失败" "1;31") ("❎" "失败" "1;31")
+    ("⚠" "警告" "1;33") ("❗" "警告" "1;33")
+    ("❓" "问" "36") ("❔" "问" "36") ("ℹ" "提示" "36") ("💡" "提示" "1;36")
+    ("🔥" "要点" "1;35") ("⭐" "*" "33") ("✨" "*" "33") ("🌟" "*" "33")
+    ("🔁" "重载" "1;35") ("🔄" "重载" "1;35") ("🔃" "重载" "1;35")
+    ("🔧" "工具" "1;34") ("🛠" "工具" "1;34") ("⚙" "配置" "34")
+    ("🧪" "测试" "34") ("🔍" "搜索" "36")
+    ("📄" "文件" "34") ("📝" "笔记" "36") ("📌" "备注" "36") ("📖" "文档" "36")
+    ("📁" "目录" "34") ("📂" "目录" "34") ("🗂" "目录" "34")
+    ("🗑" "删除" "1;31") ("🧹" "清理" "31")
+    ("🚀" "启动" "1;36") ("👉" "->" "36") ("⏳" "等待" "2")
+    ("🎉" "完成" "1;32") ("👋" "再见" "36") ("📦" "包" "34")
+    ("🧠" "思考" "1;35") ("🎨" "样式" "35")
+    ("🔒" "锁定" "33") ("🔓" "解锁" "32") ("📊" "统计" "36") ("🛡" "安全" "33"))
+  "常见 emoji → 彩色文本标签映射（默认不再输出任何 emoji）。")
 
-(defun md-emoji-ascii-p ()
-  "判断是否需要把 emoji 降级为 ASCII 文本。"
-  (cond
-    ((eq *md-emoji-mode* t) t)
-    ((null *md-emoji-mode*) nil)
-    (t (and (uiop:getenv "OS")
-            (null (uiop:getenv "WT_SESSION"))
-            (null (uiop:getenv "TERM"))
-            (null (uiop:getenv "COLORTERM"))))))
+(defun md-emoji-clean-p ()
+  "是否需要把 emoji 转成彩色文本标签（:auto 与 t 均转换；nil 保留原样）。"
+  (not (null *md-emoji-mode*)))
+
+(defun md-tag (label style)
+  "输出彩色方括号标签；ui.lisp 缺失时退化为纯文本。"
+  (if (fboundp 'ui-tag)
+      (funcall 'ui-tag label style)
+      (format nil "[~A]" label)))
 
 (defun md-emoji-code-p (code)
   (or (<= #x1F000 code #x1FAFF)
@@ -77,16 +103,16 @@
       (<= #x2B00 code #x2BFF)))
 
 (defun md-clean-text (text)
-  "把 emoji / 键帽数字 / 变体选择符降级为纯文本，避免 CMD 乱码。"
+  "把 emoji / 键帽数字 / 变体选择符统一转成彩色文本标签（不输出 emoji）。"
   (let ((n (length text))
-        (ascii-p (md-emoji-ascii-p)))
+        (clean-p (md-emoji-clean-p)))
     (with-output-to-string (out)
       (loop with i = 0
             while (< i n)
             do (let* ((ch (char text i))
                       (code (char-code ch))
-                      (rep (and ascii-p
-                                (cdr (assoc (string ch) *md-emoji-ascii* :test #'string=)))))
+                      (rep (and clean-p
+                                (assoc (string ch) *md-emoji-tags* :test #'string=))))
                  (cond
                    ;; 键帽数字：'5' + 可选 U+FE0F + U+20E3 → "5."
                    ((and (or (digit-char-p ch) (char= ch #\#) (char= ch #\*))
@@ -105,9 +131,9 @@
                    ((or (= code #xFE0F) (= code #xFE0E) (= code #x200D) (= code #x20E3))
                     (incf i))
                    ;; 已知 emoji → ASCII
-                   (rep (write-string rep out) (incf i))
+                   (rep (write-string (md-tag (second rep) (third rep)) out) (incf i))
                    ;; 未知 emoji（CMD 下必乱码）→ 丢弃
-                   ((and ascii-p (md-emoji-code-p code)) (incf i))
+                   ((and clean-p (md-emoji-code-p code)) (incf i))
                    (t (write-char ch out) (incf i))))))))
 
 ;;; ── 显示宽度（中文 / emoji 记 2 列） ───────────────────────
@@ -165,7 +191,7 @@
                      ((char= ch #\`)
                       (let ((end (position #\` text :start (1+ i))))
                         (if end
-                            (progn (emit (md-wrap "30;46" (subseq text (1+ i) end)))
+                            (progn (emit (md-wrap *md-code-inline-style* (subseq text (1+ i) end)))
                                    (setf i (1+ end)))
                             (progn (emit (string ch)) (incf i)))))
                      ((has-at-p "**" i)
@@ -182,10 +208,19 @@
                             (progn (emit "~~") (incf i 2)))))
                      ((or (char= ch #\*) (char= ch #\_))
                       (let* ((marker (string ch))
-                             (end (search marker text :start2 (1+ i))))
-                        (if (and end (> end (1+ i)))
-                            (progn (emit (md-italic (md-inline (subseq text (1+ i) end))))
-                                   (setf i (1+ end)))
+                             (end (search marker text :start2 (1+ i)))
+                             (prev-ok (or (= i 0)
+                                          (not (md-ascii-word-p (char text (1- i))))))
+                             (next-ok (and end
+                                           (or (>= (1+ end) n)
+                                               (not (md-ascii-word-p (char text (1+ end))))))))
+                        (if (and end (> end (1+ i)) prev-ok next-ok)
+                            (if (md-lisp-symbol-p (subseq text (1+ i) end))
+                                ;; Lisp 标识符：原样保留 *星号*，不渲染成斜体
+                                (progn (emit (subseq text i (1+ end)))
+                                       (setf i (1+ end)))
+                                (progn (emit (md-italic (md-inline (subseq text (1+ i) end))))
+                                       (setf i (1+ end))))
                             (progn (emit (string ch)) (incf i)))))
                      ((char= ch #\[)
                       (let* ((close (position #\] text :start (1+ i)))
@@ -456,7 +491,7 @@
                                                      (if (zerop (length lang)) "code" lang)))))))
                      ;; 2. 代码块内容
                      (in-code
-                      (format out "~A~%" (md-wrap "36" (format nil "  │ ~A" raw))))
+                      (format out "~A~%" (md-wrap "37" (format nil "  │ ~A" raw))))
                      ;; 3. 空行
                      ((zerop (length trimmed))
                       (format out "~%"))
@@ -478,7 +513,7 @@
                      ;; 7. 无序列表
                      ((md-ulist-p trimmed)
                       (format out "~A~%" (format nil "~A~A ~A"
-                                                 pad (md-cyan "•")
+                                                 pad (md-gray "•")
                                                  (md-inline (subseq trimmed 2)))))
                      ;; 8. 有序列表
                      ((md-olist trimmed)

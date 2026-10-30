@@ -271,7 +271,7 @@
 
 (defun json-decode (str)
   "将 JSON 字符串解析为 Lisp 数据结构。"
-  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return #\⭕ #\ufeff) str)))
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return #\ufeff) str)))
     (when (zerop (length trimmed))
       (error "空 JSON 字符串"))
     (values (parse-json-value trimmed 0 (length trimmed)))))

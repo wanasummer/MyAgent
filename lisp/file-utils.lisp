@@ -180,10 +180,10 @@
                                 :if-does-not-exist :create
                                 :external-format :utf-8)
           (write-string (or content "") out))
-        (format t "  📄 已写入文件: ~A~%" resolved)
+        (format t "  ~A 已写入文件: ~A~%" (ui-tag-ok "写入") resolved)
         t)
     (error (e)
-      (format *error-output* "  ❌ 写入文件失败: ~A~%" e)
+      (format *error-output* "  ~A 写入文件失败: ~A~%" (ui-tag-err "失败") e)
       nil)))
 
 ;;; ── 4. 追加文件 (append_file) ────────────────────────
@@ -201,10 +201,10 @@
                                       :external-format :utf-8)
                 (write-string (or content "") out)
                 (terpri out))
-              (format t "  📄 已追加内容到文件: ~A~%" resolved)
+              (format t "  ~A 已追加内容到文件: ~A~%" (ui-tag-ok "追加") resolved)
               t)))
     (error (e)
-      (format *error-output* "  ❌ 追加文件失败: ~A~%" e)
+      (format *error-output* "  ~A 追加文件失败: ~A~%" (ui-tag-err "失败") e)
       nil)))
 
 ;;; ── 5. 文件内文本搜索 (search_text) ──────────────────
@@ -302,7 +302,7 @@
         (uiop:copy-file src-pn dest-pn)
         t)
     (error (e)
-      (format *error-output* "  ❌ 复制文件失败: ~A~%" e)
+      (format *error-output* "  ~A 复制文件失败: ~A~%" (ui-tag-err "失败") e)
       nil)))
 
 ;;; ── 9. 移动文件或目录 (move_path) ────────────────────
@@ -341,7 +341,7 @@
            t)
           (t nil)))
     (error (e)
-      (format *error-output* "  ❌ 删除失败: ~A~%" e)
+      (format *error-output* "  ~A 删除失败: ~A~%" (ui-tag-err "失败") e)
       nil)))
 
 ;;; ── 项目路径与数据目录（开源友好：不写死任何本地路径） ──────
