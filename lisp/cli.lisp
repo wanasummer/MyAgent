@@ -925,10 +925,18 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
               (setf drawn-rows rows
                     drawn-cursor-row endrow)))
          (submit ()
-           (let ((body (cond (edit-mode edit-buf)
-                             (paste (paste-body))
-                             (t (coerce typed 'string)))))
-             (format t "~%")
+           (let* ((body (cond (edit-mode edit-buf)
+                              (paste (paste-body))
+                              (t (coerce typed 'string))))
+                  (plain (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                      (or body "")))
+                  ;; 普通提问：把刚绘制的输入块整块擦掉，只保留 run-agent 打印的
+                  ;; 浅色背景回显；/命令 与 ,表达式 仍保留原始输入行。
+                  (command-like (and (plusp (length plain))
+                                     (member (char plain 0) '(#\/ #\,)))))
+             (if command-like
+                 (format t "~%")
+                 (cli-erase-input-block drawn-cursor-row))
              (finish-output)
              (setf result body
                    done t)))
@@ -1665,6 +1673,18 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
 
 (defparameter *cli-user-echo-fg* "30"
   "用户消息回显的前景色；浅色背景上用深色文字，保证可读。")
+
+(defun cli-erase-input-block (cursor-row)
+  "把刚提交的输入块整块擦掉（光标上移到块首行后清到屏幕底部），
+只保留随后打印的浅色背景用户消息。仅在 VT 可用的裸模式下调用。"
+  (when (and (integerp cursor-row) (>= cursor-row 0))
+    (let ((esc (code-char 27)))
+      (format t "~C" #\Return)
+      (when (plusp cursor-row)
+        (format t "~C[~DA" esc cursor-row))
+      (format t "~C[J" esc)
+      (finish-output))
+    t))
 
 (defun cli-user-echo-line (text first)
   "把一行用户消息渲染成整行浅色背景条。首行带 You 标签，续行用等宽缩进对齐。

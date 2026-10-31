@@ -30,3 +30,6 @@ desktop.ini
 
 # 内置 SBCL 运行时整体入库（含 contrib/*.fasl）
 !/bin/**
+
+# 人工备份文件
+*.bak*
