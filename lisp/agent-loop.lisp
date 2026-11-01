@@ -68,23 +68,57 @@
             desktop-dir
             *tool-names-order*)))
 
-;;; ── 日志参数截断格式化 ───────────────────────────────
+;;; ── 项目纲领 (Agents.md) 动态注入 ─────────────────────
 
-(defun format-args-for-log (args-ht)
-  "格式化工具参数用于日志输出，对超长字符串截断避免刷屏。"
-  (if (not (hash-table-p args-ht))
-      (princ-to-string args-ht)
-      (let ((display (jobj))
-            (max-len 120))
-        (maphash (lambda (k v)
-                   (if (and (stringp v) (> (length v) max-len))
-                       (let* ((lines (1+ (count #\Newline v)))
-                              (sub (substitute #\↵ #\Newline (subseq v 0 max-len))))
-                         (setf (jget display k)
-                               (format nil "~A… (共 ~D 字符, ~D 行)" sub (length v) lines)))
-                       (setf (jget display k) v)))
-                 args-ht)
-        (json-encode display))))
+(defparameter *agents-md-filename* "Agents.md"
+  "项目纲领文件名：位于项目根目录，每轮 LLM 请求前读取并追加到 System Prompt 末尾。")
+
+(defparameter *agents-md-max-chars* 20000
+  "注入 Agents.md 的最大字符数，超出部分截断，避免挤占上下文预算。")
+
+(defvar *agents-md-cache* nil
+  "Agents.md 缓存：(:path 路径 :mtime 写入时间 :content 文本)。按 mtime 失效，改文件后下一轮自动生效。")
+
+(defun agents-md-path ()
+  "返回项目根目录下 Agents.md 的路径；解析失败时返回 nil。"
+  (ignore-errors (resolve-path *agents-md-filename*)))
+
+(defun load-agents-md (&optional force)
+  "读取并缓存项目纲领 Agents.md 正文；文件不存在、读取失败或内容为空时返回 nil。
+以 file-write-date 作为缓存键，因此编辑保存后下一轮请求即生效，无需重启或热重载。"
+  (let ((path (agents-md-path)))
+    (when (and path (probe-file path))
+      (let ((mtime (ignore-errors (file-write-date path)))
+            (cached *agents-md-cache*))
+        (unless (and (not force)
+                     cached
+                     (equal (getf cached :path) path)
+                     (eql (getf cached :mtime) mtime))
+          (setf *agents-md-cache*
+                (list :path path
+                      :mtime mtime
+                      :content (handler-case
+                                   (uiop:read-file-string path :external-format :utf-8)
+                                 (error () nil)))))
+        (let ((text (getf *agents-md-cache* :content)))
+          (when (stringp text)
+            (setf text (string-trim '(#\Space #\Tab #\Newline #\Return) text))
+            (cond
+              ((zerop (length text)) nil)
+              ((> (length text) *agents-md-max-chars*)
+               (format nil "~A~%~%;; [Agents.md 超出 ~D 字符上限，已截断]"
+                       (subseq text 0 *agents-md-max-chars*)
+                       *agents-md-max-chars*))
+              (t text))))))))
+
+(defun build-system-prompt (&optional force-agents-reload)
+  "构造本轮 System Prompt：静态前缀 *system-prompt* 原样保留以命中 prompt cache，
+项目纲领 Agents.md 追加在末尾。纲领缺失时退化为原始 *system-prompt*。"
+  (let ((agents (load-agents-md force-agents-reload)))
+    (if agents
+        (format nil "~A~%~%## 项目纲领（Agents.md · 每轮自动注入）~%~%~A"
+                *system-prompt* agents)
+        *system-prompt*)))
 
 ;;; ── 消息 content 归一化与空回答诊断 ─────────────────
 
@@ -301,12 +335,16 @@
 ;;; ── 工具执行 ─────────────────────────────────────────
 
 (defun execute-tool-use-block (tool-use &optional turn)
-  "执行单个 tool_use 块，返回对应的 tool_result 块；同时打印简洁的执行日志。"
+  "执行单个 tool_use 块，返回对应的 tool_result 块；同时打印简洁的执行日志。
+支持执行期间按 ESC 实时中断，以及超时自动熔断（Watchdog），防止死循环卡死主线程。"
   (let* ((t-id (or (jget tool-use "id") (format nil "toolu_~D" (get-universal-time))))
          (t-name (or (jget tool-use "name") "(unknown)"))
          (t-input (let ((in (jget tool-use "input")))
                     (if (hash-table-p in) in (jobj))))
          (args-line (format-tool-args-line t-input))
+         (timeout (if (string= t-name "eval_lisp")
+                      (if (boundp '*eval-lisp-timeout-seconds*) *eval-lisp-timeout-seconds* 15)
+                      (if (boundp '*default-tool-timeout-seconds*) *default-tool-timeout-seconds* 30)))
          (start (get-internal-real-time)))
     (log-line "~A ~A ~A~@[ ~A~]~%"
               (ui-dim (format nil "[~2,'0D]" (or turn 0)))
@@ -314,31 +352,74 @@
               (ui-colorize "1;36" t-name)
               (if (zerop (length args-line)) nil (ui-dim args-line)))
     (handler-case
-        ;; 通过符号 funcall 调用 execute-tool，确保热更新后立即走新逻辑
-        (let* ((res (funcall 'execute-tool t-name t-input))
-               (res-str (if (stringp res) res (json-encode res)))
-               (ms (round (* 1000 (/ (- (get-internal-real-time) start)
-                                     internal-time-units-per-second))))
-               (head (let* ((trimmed (string-left-trim '(#\Space #\Tab #\Return #\Newline) res-str))
-                            (json-p (and (> (length trimmed) 0)
-                                         (member (char trimmed 0) '(#\{ #\[)))))
-                       (unless json-p
-                         (let ((nl (position #\Newline trimmed)))
-                           (log-clip (if nl (subseq trimmed 0 nl) trimmed) 40))))))
-          (if head
-              (log-line "    ~A ~A~%" (ui-dim "<")
-                        (ui-dim (format nil "~A 字符 · ~D ms · ~A" (length res-str) ms head)))
-              (log-line "    ~A ~A~%" (ui-dim "<")
-                        (ui-dim (format nil "~A 字符 · ~D ms" (length res-str) ms))))
-          (jobj "type" "tool_result"
-                "tool_use_id" t-id
-                "content" (clip-tool-result res-str t-name)))
+        (multiple-value-bind (res status diagnostic)
+            (if (fboundp 'call-tool-with-cancel-and-timeout)
+                (funcall 'call-tool-with-cancel-and-timeout
+                         (lambda () (funcall 'execute-tool t-name t-input))
+                         :timeout timeout
+                         :tool-name t-name
+                         :args-summary args-line)
+                (values (funcall 'execute-tool t-name t-input) :done nil))
+          (let* ((ms (round (* 1000 (/ (- (get-internal-real-time) start)
+                                       internal-time-units-per-second))))
+                 (stalled-p (member status '(:timeout :rollback)))
+                 (repeated-loop-p
+                   (and (fboundp 'record-turn-tool-signature)
+                        (funcall 'record-turn-tool-signature t-name args-line stalled-p)))
+                 (loop-note
+                   (when repeated-loop-p
+                     (and (fboundp 'maybe-intervene-turn-loop)
+                          (funcall 'maybe-intervene-turn-loop t-name args-line)))))
+            (cond
+              ((eq status :cancelled)
+               (log-line "    ~A ~D ms · 用户按 ESC 中断工具执行~%" (ui-tag-warn "中断") ms)
+               (make-cancelled-tool-result tool-use))
+              ((eq status :rollback)
+               (let ((rmsg (format nil "[督导回退] 督导子 Agent 检测到死循环并已程序化回滚代码 (~A, ~D ms):~%~A~@[~%~%~A~]"
+                                   t-name ms (or diagnostic "") loop-note)))
+                 (log-line "    ~A ~D ms · 督导子 Agent 已回滚未验证代码并中断死循环~%"
+                           (ui-tag-warn "督导回退") ms)
+                 (jobj "type" "tool_result"
+                       "tool_use_id" t-id
+                       "is_error" t
+                       "content" rmsg)))
+              ((eq status :timeout)
+               (let ((tmsg (format nil "[督导熔断] 督导子 Agent 判定工具 ~A 陷入死循环 (~D ms):~%~A~%~%-> 请根据上方实时 SBCL 调用栈定位死循环原因，改用非阻塞纯函数方式测试。~@[~%~%~A~]"
+                                   t-name ms
+                                   (or diagnostic
+                                       (format nil "执行超过 ~D 秒无进展" timeout))
+                                   loop-note)))
+                 (log-line "    ~A ~D ms · 督导子 Agent 熔断死循环~%" (ui-tag-err "督导熔断") ms)
+                 (jobj "type" "tool_result"
+                       "tool_use_id" t-id
+                       "is_error" t
+                       "content" tmsg)))
+              (t
+               (let* ((res-str (if (stringp res) res (json-encode res)))
+                      (final-str (if loop-note
+                                     (format nil "~A~%~%~A" (clip-tool-result res-str t-name) loop-note)
+                                     (clip-tool-result res-str t-name)))
+                      (head (let* ((trimmed (string-left-trim '(#\Space #\Tab #\Return #\Newline) res-str))
+                                   (json-p (and (> (length trimmed) 0)
+                                                (member (char trimmed 0) '(#\{ #\[)))))
+                              (unless json-p
+                                (let ((nl (position #\Newline trimmed)))
+                                  (log-clip (if nl (subseq trimmed 0 nl) trimmed) 40))))))
+                 (if head
+                     (log-line "    ~A ~A~%" (ui-dim "<")
+                               (ui-dim (format nil "~A 字符 · ~D ms · ~A" (length res-str) ms head)))
+                     (log-line "    ~A ~A~%" (ui-dim "<")
+                               (ui-dim (format nil "~A 字符 · ~D ms" (length res-str) ms))))
+                 (jobj "type" "tool_result"
+                       "tool_use_id" t-id
+                       "content" final-str))))))
       (error (e)
         (let ((ms (round (* 1000 (/ (- (get-internal-real-time) start)
                                     internal-time-units-per-second)))))
           (log-line "    ~A ~D ms · ~A~%" (ui-tag-err "失败") ms e)
           (jobj "type" "tool_result"
                 "tool_use_id" t-id
+                "is_error" t
                 "content" (format nil "工具执行失败: ~A" e)))))))
 
 ;;; ── ESC 中断与 Agent 主循环 ─────────────────────────
@@ -402,6 +483,7 @@
 
   (when (fboundp 'reset-ctx-run-stats) (reset-ctx-run-stats))
   (when (fboundp 'reset-cancel-state) (funcall 'reset-cancel-state))
+  (when (fboundp 'reset-supervisor-session) (funcall 'reset-supervisor-session))
 
   ;; CLI 交互模式下：先把用户消息以醒目样式回显到历史里，便于滚动时定位。
   ;; 放在 run-agent（而不是 start-cli）是为了热重载后立即生效：
@@ -444,7 +526,7 @@
                                 (call-llm-with-cancel
                                  (lambda ()
                                    (funcall 'chat-with-tools
-                                            :system *system-prompt*
+                                            :system (build-system-prompt)
                                             :messages messages
                                             :tools all-tools)))))
                        (handler-case

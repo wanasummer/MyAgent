@@ -337,27 +337,62 @@
 
 ;;; ── 注册 Lisp 原生热迭代工具 (Self-Iteration) ───────
 
+(defvar *in-eval-lisp* nil
+  "当前是否处于 eval_lisp 工具求值上下文中（用于防止控制台读取函数在自测时无限阻塞）。")
+
+(defparameter *protected-console-fns*
+  '(%console-fetch-records %console-peek-records %console-input-handle
+    %console-wait-input console-pending-char-p)
+  "eval_lisp 异常中断或超时时必须自动恢复的底层控制台 I/O 函数，防止临时 mock 忘还原导致终端彻底失灵。")
+
+(defun snapshot-protected-fns ()
+  (let ((saved nil))
+    (dolist (sym *protected-console-fns*)
+      (when (fboundp sym)
+        (push (cons sym (symbol-function sym)) saved)))
+    saved))
+
+(defun restore-protected-fns (saved)
+  (dolist (pair saved)
+    (ignore-errors (setf (symbol-function (car pair)) (cdr pair)))))
+
 (defun eval-lisp-string (code-str)
-  "在当前 SBCL 镜像中顺序读取并求值一段或多段 S-表达式，捕获标准输出与返回值。"
+  "在当前 SBCL 镜像中顺序读取并求值一段或多段 S-表达式，捕获标准输出与返回值。
+内置防卡死护栏：
+1) 将 *standard-input* 绑定为空字符串流，防止 (read) / (read-line) 阻塞等待键盘；
+2) 绑定 *in-eval-lisp* = t，让 read-console-line 在 mock 队列耗尽后自动退出而非无限 sleep；
+3) 若求值因异常/超时/ESC 中断退出，自动还原被临时替换的底层控制台函数。"
   (let ((stdout-buf (make-string-output-stream))
+        (empty-stdin (make-string-input-stream ""))
+        (saved-fns (snapshot-protected-fns))
+        (completed-ok nil)
         (last-val nil))
-    (handler-case
-        (let ((*standard-output* stdout-buf)
-              (*package* (find-package :cl-user))
-              #+sbcl (sb-ext:*muffled-warnings* 'style-warning))
-          (with-input-from-string (in code-str)
-            (loop for form = (read in nil :eof)
-                  until (eq form :eof)
-                  do (setf last-val (eval form))))
-          (let ((out-str (get-output-stream-string stdout-buf)))
-            (jobj "success" t
-                  "result" (prin1-to-string last-val)
-                  "stdout" out-str)))
-      (error (e)
-        (let ((out-str (get-output-stream-string stdout-buf)))
-          (jobj "success" :false
-                "error" (format nil "~A" e)
-                "stdout" out-str))))))
+    (unwind-protect
+         (handler-case
+             (let ((*in-eval-lisp* t)
+                   (*active-eval-stdout-stream* stdout-buf)
+                   (*standard-input* empty-stdin)
+                   (*standard-output* stdout-buf)
+                   (*package* (find-package :cl-user))
+                   #+sbcl (sb-ext:*muffled-warnings* 'style-warning))
+               (with-input-from-string (in code-str)
+                 (loop for form = (read in nil :eof)
+                       until (eq form :eof)
+                       do (when (fboundp 'note-worker-progress)
+                            (funcall 'note-worker-progress))
+                          (setf last-val (eval form))))
+               (setf completed-ok t)
+               (let ((out-str (get-output-stream-string stdout-buf)))
+                 (jobj "success" t
+                       "result" (prin1-to-string last-val)
+                       "stdout" out-str)))
+           (serious-condition (e)
+             (let ((out-str (get-output-stream-string stdout-buf)))
+               (jobj "success" :false
+                     "error" (format nil "~A" e)
+                     "stdout" out-str))))
+      (unless completed-ok
+        (restore-protected-fns saved-fns)))))
 
 (register-tool
  "eval_lisp"

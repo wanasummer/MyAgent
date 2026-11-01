@@ -9,8 +9,10 @@
 ## 主要特性
 
 - **开箱即用**：项目内置 SBCL 运行时（`bin/`），无需安装任何依赖
-- **免重启自迭代**：修改 `.lisp` 即热重载；失败自动回滚到上一个可用版本，任务不中断
-- **终端 Markdown 渲染**：标题 / 列表 / 代码块 / **表格等宽对齐**（中文按 2 列宽）/ 长单元格自动折行
+- **免重启自迭代与四层防失联自愈**：修改 `.lisp` 即热重载；内置**冒烟自检 + 两阶段事务快照 + 运行期崩溃自动回滚 + 旁路督导子 Agent (`supervisor.lisp`)**，即使改坏底层通信或写出死循环也能自动回退自愈，任务不中断
+- **旁路督导子 Agent（防死循环 & 防误杀）**：摒弃「固定超时一刀切」，通过**进展心跳监测 + SBCL 非侵入式实时调用栈采样（`list-backtrace`）+ 轻量 SubAgent 裁决**，自动区分「正常耗时任务（`:EXTEND` 顺延）」、「单次工具死循环（`:ABORT-TOOL` 精准中断）」与「热重载代码死锁（`:ROLLBACK-CODE` 程序化回退）」
+- **终端 Markdown 渲染**：标题 / 列表 / 代码块 / **表格等宽对齐**（中文按 2 列宽）/ 长单元格自动折行；**流式输出的正文同样逐行渲染**（普通行即时渲染，表格整块对齐后再输出），不会先冒出一段原始 Markdown
+- **24-bit 半块高精度 CLI 像素画**：启动横幅并排绘制经典 **《玲音》岩仓玲音黑白剪影肖像 (Iwakura Lain)** 与 **DeepSeek 官方蓝鲸** 26×28 半块像素图标，自动适配深浅色终端背景
 - **彩色提示**：统一用 `[成功]` / `[失败]` / `[警告]` / `[提示]` 彩色标签代替 emoji，`/color` 可开关
 - **终端友好**：emoji 与键帽数字自动转成文本标签，避免乱码
 - **持久化记忆**：Markdown 文件存储，跨会话保留，目录随项目走
@@ -22,24 +24,27 @@
 ## 项目结构
 
 ```text
-├── run.lisp              # SBCL 启动与模块引导入口
-├── start.bat             # Windows 启动脚本（优先使用 bin/ 内置运行时）
-├── start.sh              # Linux / macOS 启动脚本
-├── .env.example          # 环境变量示例
-├── bin/                  # 内置 SBCL 运行时（sbcl(.exe) + sbcl.core + contrib/）
-│   └── README.md         # 运行时获取方式与许可说明
-├── memory/               # 持久化记忆（默认不纳入版本控制）
+├── run.lisp                 # SBCL 启动与模块引导入口
+├── start.bat                # Windows 启动脚本（优先使用 bin/ 内置运行时）
+├── start.sh                 # Linux / macOS 启动脚本
+├── .env.example             # 环境变量示例
+├── bin/                     # 内置 SBCL 运行时（sbcl(.exe) + sbcl.core + contrib/）
+│   └── README.md            # 运行时获取方式与许可说明
+├── memory/                  # 持久化记忆（默认不纳入版本控制）
 └── lisp/
-    ├── json.lisp         # 纯 Common Lisp RFC 8259 JSON 解析与序列化
-    ├── config.lisp       # .env / 配置加载与 DeepSeek 配置解析
-    ├── file-utils.lisp   # 文件读写、搜索、移动、删除 + 路径工具
-    ├── markdown.lisp     # 终端 Markdown 渲染（表格对齐 / emoji 转标签）
-    ├── llm-client.lisp   # DeepSeek LLM 客户端（Anthropic Messages 兼容）
-    ├── reload-engine.lisp# 安全热重载引擎（快照 / 回滚 / 错误回传）
-    ├── tools.lisp        # 动态工具注册表 + 内置工具实现
-    ├── agent-loop.lisp   # ReAct Agent 主循环
+    ├── reload-engine.lisp   # 安全热重载引擎（三级快照 / 冒烟自检 / 两阶段事务回滚）
+    ├── json.lisp            # 纯 Common Lisp RFC 8259 JSON 解析与序列化
+    ├── config.lisp          # .env / 配置加载与 DeepSeek 配置解析
+    ├── ui.lisp              # 终端 ANSI 颜色与语义标签渲染
+    ├── file-utils.lisp      # 文件读写、搜索、移动、删除 + 路径工具
+    ├── markdown.lisp        # 终端 Markdown 渲染（表格对齐 / emoji 转标签）
+    ├── llm-client.lisp      # DeepSeek LLM 客户端（Anthropic Messages 兼容 + SSE 流式输出）
+    ├── cancel.lisp          # 后台工作线程调度 + ESC 实时中断轮询
+    ├── supervisor.lisp      # 旁路督导子 Agent（心跳监测 / 实时栈采样 / 死循环程序化决策回退）
+    ├── tools.lisp           # 动态工具注册表 + 内置工具与 eval_lisp 防篡改沙箱
+    ├── agent-loop.lisp      # ReAct Agent 主循环（含运行期通信异常自动回滚重试）
     ├── context-manager.lisp # 上下文压缩（head+omit+tail）+ 缓存命中观测
-    └── cli.lisp          # 控制台交互式 REPL
+    └── cli.lisp             # 控制台交互式 REPL（裸模式行编辑器 + 粘贴折叠 + 半块像素画）
 ```
 
 ---
@@ -132,12 +137,55 @@ Key 保存在 `~/.myagent/config`（**不在项目目录内，不会被提交**�
 
 ---
 
-## 免重启实时自我迭代
+## 免重启实时自我迭代与四层防失联自愈架构
 
+MyAgent 全部核心逻辑运行在单个常驻 SBCL 进程镜像中：
 1. **写入即热重载**：`write_file` / `append_file` 写入 `.lisp` 后立即 `load` 进当前镜像；
-   若编译失败，则**自动回滚磁盘与内存到上一个可用版本**，并把错误回传给你（任务继续）。
-2. **内存直接求值**：`eval_lisp` 可执行任意 S-表达式，第 N 轮注册的工具在第 N+1 轮即可调用。
-3. **手动重载**：`/reload` 或 `reload_lisp` 工具。
+2. **内存直接求值**：`eval_lisp` 可执行任意 S-表达式，第 $N$ 轮注册的工具在第 $N+1$ 轮即可调用；
+3. **手动重载与回滚**：支持 `/reload`（或 `reload_lisp` 工具）以及 `/rollback [baseline]` 紧急回退。
+
+在自我迭代场景下，单纯拦截「编译期语法错误」是不够的——如果 Agent 改坏了底层 HTTP 通信参数（编译通过但运行期报 `curl exit 2`），或在 `eval_lisp` 中写出无限死循环，就会导致 Agent **「大脑失联」或「主线程死锁」**。为此系统构建了完整的 **四层运行期自愈防线**：
+
+```mermaid
+flowchart TD
+    A["Agent 修改 .lisp 核心代码或执行 eval_lisp"] --> B["第一层：热重载冒烟自检钩子<br/>(smoke-test-reloaded-file)"]
+    B -- "符号缺失 / JSON 损坏 / 不支持的 curl 参数" --> R1["当场自动回滚磁盘与内存<br/>错误通过 tool_result 返回 Agent"]
+    B -- "通过" --> C["第二层：两阶段事务快照<br/>(Baseline / Verified / Unverified)"]
+    C --> D["第三层：下一轮 LLM 通信自愈守护<br/>(run-agent 捕获运行期异常)"]
+    D -- "HTTP/运行期崩溃且存在 Unverified 修改" --> R2["自动回滚 Unverified 文件<br/>注入 <system-reminder> 并原地重试请求"]
+    D -- "LLM 响应成功" --> E["commit-verified-lisp-backups<br/>正式确认为 Verified 快照"]
+    C --> F["第四层：旁路督导子 Agent (lisp/supervisor.lisp)<br/>监听工作线程进展心跳 + SBCL 实时栈采样"]
+    F -- ":EXTEND (有进展或调用栈正常推进)" --> G["自动顺延观察窗口，绝不误杀长任务"]
+    F -- ":ABORT-TOOL (单次工具死循环)" --> H["精准中断工作线程 + 还原被篡改符号<br/>附带 3 次 SBCL 实时调用栈返回 Agent"]
+    F -- ":ROLLBACK-CODE (新代码引发死锁/跨轮鬼打墙)" --> R3["程序化调用 rollback-unverified-lisp-files<br/>回退代码 + 注入督导干预指令"]
+```
+
+### 1. 第一层：热重载「冒烟自检钩子」（Post-Load Smoke Test）
+每次热重载关键模块（`llm-client.lisp`、`json.lisp`、`agent-loop.lisp`、`tools.lisp`）后，在 `load` 阶段内立即运行轻量级自检（[`smoke-test-reloaded-file`](lisp/reload-engine.lisp)）：
+- 检查核心入口函数符号是否仍为 `fboundp`；
+- 验证 `json-encode` / `json-decode` 往返闭环；
+- 探测系统 `curl` 的 `libcurl` 编译特性（[`curl-supports-compressed-p`](lisp/reload-engine.lisp)），拦截当前系统不支持的命令行参数（如 Windows 自带无 `libz` 的 `curl.exe` 传入 `--compressed`）。一旦自检不过，在 `write_file` 当场回滚并报错。
+
+### 2. 第二层：两阶段事务快照（Two-Phase Snapshot）
+在 [`lisp/reload-engine.lisp`](lisp/reload-engine.lisp) 中维护三级源码快照，杜绝「新代码刚编译通过就把唯一好备份覆盖掉」的问题：
+- `*lisp-baseline-backups*`：进程启动时的**黄金基线快照**（永不覆盖，可通过 `/rollback baseline` 一键恢复）；
+- `*lisp-file-backups*`：当前已加载版本快照；
+- `*lisp-unverified-backups*`：本轮热重载过、但**尚未经过下一轮 LLM 通信验证**的改动前快照。只有当下一轮 `chat-with-tools` 真正成功返回后，才调用 [`commit-verified-lisp-backups`](lisp/reload-engine.lisp) 确认提交。
+
+### 3. 第三层：LLM 通信崩溃时的「运行期自动回滚 + 原地重试」
+若某次修改绕过了冒烟测试，但在下一轮调用 `chat-with-tools` 时触发运行期异常（[`lisp/agent-loop.lisp`](lisp/agent-loop.lisp)）：
+- 系统检测到存在未验证修改（`unverified-lisp-backups-p`）时，自动调用 [`rollback-unverified-lisp-files`](lisp/reload-engine.lisp) 将磁盘文件与内存定义恢复到改动前版本；
+- 将刚发生的运行期异常写入 `<system-reminder>` 注入消息流，并在**同一轮内自动重试一次 LLM 请求**，实现「改坏大脑也能自愈、对话不中断」。
+
+### 4. 第四层：旁路督导子 Agent 与死循环程序化决策回退（`lisp/supervisor.lisp`）
+所有工具调用与 `eval_lisp` 均在独立后台工作线程（`myagent-tool-worker`）中运行，主线程每 50ms 轮询 `ESC` 中断，并由旁路 **Supervisor（督导器）** 实时监听，彻底取代僵化的「固定秒数一刀切超时」：
+- **进展心跳豁免（防误杀）**：实时监测 `eval_lisp` 的 `stdout` 输出流增长、顶层 S-表达式推进与目录/文件读写心跳（`note-worker-progress`）。只要任务有进展，计时器自动清零，绝不误杀合法长任务。
+- **非侵入式 SBCL 实时调用栈采样**：当工作线程连续 `6 秒`（`*supervisor-soft-stall-seconds*`）无进展时，督导器每隔 `2 秒` 通过 `sb-thread:interrupt-thread` + `sb-debug:list-backtrace` 对工作线程采集 3 次非破坏性调用栈快照（[`sample-worker-backtrace`](lisp/supervisor.lisp)）。
+- **程序化规则 + 轻量 LLM SubAgent 三态裁决（[`supervisor-decide-action`](lisp/supervisor.lisp)）**：
+  - **`:EXTEND`（顺延等待）**：若调用栈仍在正常变化推进，或督导子 Agent 判定为合理耗时计算，自动顺延观察窗口；
+  - **`:ABORT-TOOL`（精准中断单次死循环）**：若调用栈冻结在控制台输入等待（如 `READ-CONSOLE-LINE`）或同一循环帧，立即打断该工作线程、通过 `unwind-protect` 自动还原被临时 mock 的底层控制台函数（[`*protected-console-fns*`](lisp/tools.lisp)），并将 **3 次实时 SBCL 调用栈**作为 `tool_result` 返回给主 Agent；
+  - **`:ROLLBACK-CODE`（程序化代码回退）**：若死循环发生时存在尚未验证的热重载修改（`*lisp-unverified-backups*`），督导器直接程序化执行 `rollback-unverified-lisp-files` 回退磁盘与内存代码，再将回退报告与调用栈交还主 Agent。
+- **跨轮次「鬼打墙」死循环拦截**：记录每轮工具调用签名（[`record-turn-tool-signature`](lisp/supervisor.lisp)），若主 Agent 连续 3 轮以几乎相同的参数重复调用同一工具原地打转，自动回滚未验证修改并注入 `<supervisor-intervention>` 强制干预指令。
 
 > 默认**不会**每轮自动扫描磁盘上的 `.lisp`（避免任务中途被外部改动打断）。
 > 需要时把 `*auto-reload-before-turn*` 设为 `t`。
@@ -178,11 +226,15 @@ Key 保存在 `~/.myagent/config`（**不在项目目录内，不会被提交**�
 - 支持**一次粘贴整段多行文本**（代码块、报错日志、表格等）：整段收集成一条输入，不会被拆成 N 次提问。
 - 输入层由程序自己接管回显（关闭行缓冲与回显，直接用 ReadConsoleInputW 读按键记录）：粘贴进来的字符**根本不回显**，只在提示符后留一行 `You > [粘贴 12 行 · 486 字符]`，按回车才发送。
   旧版「先让终端回显、再用 ANSI 擦掉」会和 conhost 的行编辑状态打架，擦掉的内容被重画回来，表现就是「粘贴的几行擦不掉、删不掉」；本版从根上避免了。
-- 粘贴识别：一次涌入多个字符（`*paste-burst-chars*`，默认 40）或含换行即判定为粘贴；Ctrl+V / Shift+Insert 由程序直接读剪贴板；右键粘贴由 conhost 插入字符，同样会被识别。
-- 粘贴后可在占位符后面继续补写文字，回车时一次性提交（粘贴内容 + 补写内容）；粘贴文本里的换行只算内容，不会触发提交。
+- 粘贴识别：含换行、一次涌入多个字符（`*paste-burst-chars*`，默认 40），或「输入队列仍有积压」都判定为粘贴；Ctrl+V / Shift+Insert 由程序直接读剪贴板；右键粘贴由 conhost 插入字符，同样会被识别。
+- 终端会把一次大粘贴拆成多批注入（每批最多 256 条按键记录）。只要还在 `*paste-continuation-ms*`（默认 400ms）的续接窗口内、或输入队列里仍有积压，后续批次就继续并入同一段粘贴，整段折叠，不会出现「占位符前面漏一段、后面又漏一段」。
+- 粘贴前已经输入的文字会**保留并显示在占位符前面**，粘贴后在占位符后面还能继续补写；回车时按「已输入正文 / 粘贴内容 / 补写文字」三段用换行拼接提交，不会粘成同一行。
+- 一次新的多行粘贴如果接在未换行的内容后面，会自动补一个换行再拼接；同一次粘贴被终端拆成多批到达时不会插入多余换行。
+- 粘贴文本里的换行只算内容，不会触发提交；提交时会自动去掉正文首尾多余的空行，编辑模式里多按的回车不会变成空的用户回显行。
 - 逐字输入、中文输入法上屏（通常 2~10 字）不会被误判成粘贴，照常回显。
 - 行内编辑：退格 = 删除最后一个字符（先删补写的字，再逐字删粘贴内容）；600ms 内**连按两次退格 = 整段删掉已粘贴内容**；Ctrl+退格 = 整段丢弃；Esc / Ctrl+U = 清空整行；回车 = 发送；Ctrl+Enter = 直接发送。提示文字（Esc 清除 · Ctrl+E 编辑 · Ctrl+Enter 发送）显示在输入行末尾。
-- **Ctrl+E = 展开为多行编辑模式**：把粘贴内容（或已输入文本）整段展开显示，方向键 / Home / End 移动光标，退格和 Delete 任意删除，Enter 插入换行，Esc 退出编辑（回到折叠视图），Ctrl+Enter 直接发送。
+- **Ctrl+E = 展开为多行编辑模式**：把粘贴内容（或已输入文本）整段展开显示，方向键 / Home / End 移动光标，退格和 Delete 任意删除，Enter 插入换行，Ctrl+Enter 直接发送。
+- **Esc 退出编辑的折叠规则**：只把「单行模式下粘贴进来的区间」还原成占位符，手写内容、以及在编辑模式里改过的文字都保持展开；编辑模式里粘贴的文字按普通输入插入，永远不会变成占位符。
 - 连续粘贴会**累加**而不是覆盖，标签会显示「N 段」，行数/字数同步增长。
 - 已知限制：普通折叠视图里不支持左右移动光标（要移动请用 Ctrl+E 进入编辑模式）；Agent 正在输出时敲的字符不会即时回显（下一个提示符出现时一起显示）；`*cli-collapse-paste*` 设 nil 可关闭折叠。
 
@@ -196,6 +248,8 @@ Key 保存在 `~/.myagent/config`（**不在项目目录内，不会被提交**�
 | `/tools` | 查看已注册工具 |
 | `/compact` | 手动压缩历史：头部+尾部保留，中段折叠为结构化摘要 |
 | `/reload` | 热重载全部核心模块 |
+| `/rollback` | 手动回滚最近未验证的热重载代码修改 |
+| `/rollback baseline` | 一键将所有核心模块恢复到进程启动时的黄金快照 |
 | `/md on\|off` | 开关 Markdown 渲染 |
 | `/color [on\|off\|auto]` | 开关 ANSI 颜色 |
 | `/emoji [on\|off]` | 开关 emoji → 彩色标签转换 |

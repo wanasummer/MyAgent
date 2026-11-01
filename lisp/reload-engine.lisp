@@ -41,6 +41,7 @@
     "lisp/markdown.lisp"
     "lisp/llm-client.lisp"
      "lisp/cancel.lisp"
+    "lisp/supervisor.lisp"
     "lisp/tools.lisp"
     "lisp/agent-loop.lisp"
     "lisp/context-manager.lisp"
@@ -61,10 +62,6 @@
   "取出并清空待注入的热重载错误（按发生顺序返回列表）。"
   (prog1 (nreverse *pending-lisp-reload-errors*)
     (setf *pending-lisp-reload-errors* nil)))
-
-(defun pending-lisp-reload-errors-p ()
-  "是否存在尚未注入给 LLM 的热重载错误。"
-  (and *pending-lisp-reload-errors* t))
 
 ;;; ── 基础读写与静默加载 ───────────────────────────────
 

@@ -23,6 +23,7 @@
     "lisp/markdown.lisp"
     "lisp/llm-client.lisp"
     "lisp/cancel.lisp"
+    "lisp/supervisor.lisp"
     ;; 安全热重载引擎必须在 tools.lisp 之前加载：
     ;; 这样即使 tools.lisp 被改坏，回滚引擎依然可用。
     "lisp/reload-engine.lisp"

@@ -39,6 +39,16 @@
 (defvar *stream-output-started* nil
   "本次请求是否已经输出过正文增量（供等待提示与最终回显判断）。")
 
+(defvar *active-stream-proc* nil
+  "当前正在运行的流式 curl 子进程；按 ESC 时主线程可直接终止它以立即唤醒 read-line。")
+
+(defun abort-active-llm-stream ()
+  "立即终止当前正在执行的流式 curl 子进程（供 ESC 中断调用）。"
+  (let ((p *active-stream-proc*))
+    (when (and p (ignore-errors (uiop:process-alive-p p)))
+      (ignore-errors (uiop:terminate-process p :force t))))
+  t)
+
 (defun stream-mode-active-p ()
   "当前是否应该走流式输出。"
   (and *stream-enabled*
@@ -55,6 +65,62 @@
        (ignore-errors (funcall 'agent-cancel-requested-p))))
 
 ;;; ── 非流式请求（回退路径） ───────────────────────────
+
+;;; ── HTTP 失败重试 ───────────────────────────────────
+
+(define-condition http-retryable-error (error)
+  ((message :initarg :message :initform "HTTP 请求失败" :reader http-retryable-message)
+   (status :initarg :status :initform nil :reader http-retryable-status))
+  (:report (lambda (c s) (format s "~A" (http-retryable-message c)))))
+
+(defparameter *http-max-attempts* 3
+  "单次请求最多尝试次数（含首次）。可用环境变量 MYAGENT_HTTP_RETRIES 覆盖。")
+
+(defparameter *http-retry-base-delay* 1.0
+  "首次重试前的等待秒数，之后按 2 倍指数退避（1s / 2s / 4s ...）。")
+
+(defparameter *http-retry-max-delay* 8.0
+  "单次重试等待上限（秒）。")
+
+(defun http-max-attempts-value ()
+  "实际使用的最大尝试次数：MYAGENT_HTTP_RETRIES 优先。"
+  (or (let ((v (and (fboundp 'get-env)
+                    (ignore-errors (get-env "MYAGENT_HTTP_RETRIES")))))
+        (and v (let ((n (ignore-errors (parse-integer v))))
+                 (and n (plusp n) n))))
+      *http-max-attempts*))
+
+(defun retryable-http-status-p (code)
+  "临时性故障（超时 / 限流 / 网关与 5xx）值得重试；
+400 / 401 / 403 这类配置或权限错误重试也不会好。"
+  (and (integerp code)
+       (member code '(408 425 429 500 502 503 504 520 522 524 529) :test #'=)
+       t))
+
+(defun http-retry-delay (attempt)
+  "第 ATTEMPT 次失败后应等待的秒数（指数退避 + 上限）。"
+  (min *http-retry-max-delay*
+       (* *http-retry-base-delay* (expt 2 (max 0 (1- attempt))))))
+
+(defun do-with-http-retry (label thunk &key no-retry-p)
+  "执行 THUNK；捕获 http-retryable-error 后按指数退避重试。
+NO-RETRY-P 返回真时立即放弃重试（例如流式响应已经输出过内容，重试会重复显示）。"
+  (loop with max = (http-max-attempts-value)
+        for attempt from 1
+        do (handler-case
+               (return (funcall thunk))
+             (http-retryable-error (e)
+               (when (or (>= attempt max)
+                         (request-cancelled-p)
+                         (and no-retry-p (funcall no-retry-p)))
+                 (error "~A失败（已尝试 ~D 次）：~A"
+                        label attempt (http-retryable-message e)))
+               (let ((d (http-retry-delay attempt)))
+                 (format t "  ~A ~A 第 ~D/~D 次失败：~A，~,1Fs 后重试~%"
+                         (ui-tag-warn "重试") label attempt max
+                         (http-retryable-message e) d)
+                 (finish-output)
+                 (sleep d))))))
 
 (defun http-post-json (url headers body-obj)
   "通过 curl.exe 发送 POST JSON 请求，返回解析后的 JSON 对象。"
@@ -84,14 +150,21 @@
                                    :output :string
                                    :error-output :string
                                    :ignore-error-status t)
-               (unless (zerop exit-code)
-                 (error "HTTP 请求失败 (curl exit ~D): ~A" exit-code stderr))
+                              (unless (zerop exit-code)
+                 (error 'http-retryable-error
+                        :message (format nil "curl exit ~D: ~A" exit-code
+                                         (subseq stderr 0 (min 160 (length stderr))))))
                (let* ((status-code (or (ignore-errors (parse-integer (trim-whitespace stdout))) 0))
                       (resp-text (if (uiop:file-exists-p (native-file-pathname resp-file))
                                      (uiop:read-file-string (native-file-pathname resp-file) :external-format :utf-8)
                                      "")))
                  (when (or (< status-code 200) (>= status-code 300))
-                   (error "DeepSeek API Error ~D (可通过 /model 重新配置 Key 或模型): ~A" status-code resp-text))
+                   (if (retryable-http-status-p status-code)
+                       (error 'http-retryable-error
+                              :status status-code
+                              :message (format nil "HTTP ~D: ~A" status-code
+                                               (subseq resp-text 0 (min 160 (length resp-text)))))
+                       (error "DeepSeek API Error ~D (可通过 /model 重新配置 Key 或模型): ~A" status-code resp-text)))
                  (json-decode resp-text)))))
       ;; 清理临时文件
       (ignore-errors (when (uiop:file-exists-p (native-file-pathname req-file))
@@ -189,13 +262,17 @@
          (out-tokens 0)
          (stop-reason nil)
          (cancelled nil)
+         (text-renderer nil)
          (proc nil))
     (labels ((emit-text (txt)
              "正文增量：立即打印；已取消则只累积不显示。"
              (setf *stream-output-started* t)
              (unless (request-cancelled-p)
-               (write-string txt)
-               (finish-output)))
+               (when (and (null text-renderer) (fboundp 'md-stream-start))
+                 (setf text-renderer (funcall 'md-stream-start)))
+               (if (and text-renderer (fboundp 'md-stream-feed))
+                   (funcall 'md-stream-feed text-renderer txt)
+                   (progn (write-string txt) (finish-output)))))
            (handle-event (obj)
              (let ((etype (jget obj "type")))
                (cond
@@ -252,6 +329,9 @@
                                    (concatenate 'string (or (jget b "_json") "") pj)))))))))
 
                  ((equal etype "content_block_stop")
+                  (when (and text-renderer (fboundp 'md-stream-finish))
+                    (funcall 'md-stream-finish text-renderer)
+                    (setf text-renderer nil))
                   (let ((b (gethash (jget obj "index") blocks)))
                     (when (and b (equal (jget b "type") "tool_use"))
                       (let ((raw-json (jget b "_json")))
@@ -287,6 +367,7 @@
                             (list "--data-binary"
                                   (format nil "@~A" (uiop:native-namestring (native-file-pathname req-file)))))
                     :output :stream :error-output :stream))
+             (setf *active-stream-proc* proc)
              (let ((stream (uiop:process-info-output proc)))
                (unwind-protect
                     (loop
@@ -295,6 +376,10 @@
                         (ignore-errors (uiop:terminate-process proc :force t))
                         (return))
                       (let ((raw (read-line stream nil :eof)))
+                        (when (request-cancelled-p)
+                          (setf cancelled t)
+                          (ignore-errors (uiop:terminate-process proc :force t))
+                          (return))
                         (when (eq raw :eof) (return))
                         (let* ((line (string-right-trim '(#\Return) raw))
                                (payload (sse-json-payload line)))
@@ -304,32 +389,52 @@
                               (when (hash-table-p obj)
                                 (handle-event obj)))))))
                  (ignore-errors (close stream))))
+             (when (request-cancelled-p)
+               (setf cancelled t))
              (let* ((code (ignore-errors (uiop:wait-process proc)))
                     (err (ignore-errors (drain-stream-string
                                          (uiop:process-info-error-output proc)))))
+               (when (and text-renderer (fboundp 'md-stream-finish))
+                 (funcall 'md-stream-finish text-renderer)
+                 (setf text-renderer nil))
                (when *stream-output-started*
                  (format t "~%")
                  (finish-output))
-               (unless (or cancelled (null code) (eql code 0))
-                 (error "HTTP 请求失败 (curl exit ~A): ~A" code (or err ""))))
+                              (unless (or cancelled (null code) (eql code 0))
+                 (error 'http-retryable-error
+                        :message (format nil "curl exit ~A: ~A" code (or err "")))))
              (if cancelled
                  nil
                  (jobj "stop_reason" (or stop-reason "end_turn")
                        "usage" (jobj "input_tokens" in-tokens
                                      "output_tokens" out-tokens)
                        "content" (assemble-stream-blocks blocks))))
+        (when (eq *active-stream-proc* proc)
+          (setf *active-stream-proc* nil))
         (ignore-errors (when (and proc (uiop:process-alive-p proc))
                          (uiop:terminate-process proc :force t)))
         (ignore-errors (when (uiop:file-exists-p (native-file-pathname req-file))
                          (delete-file (native-file-pathname req-file))))))))
 
 (defun chat-with-tools (&key system messages tools)
-  "调用当前配置的 DeepSeek 模型；交互式控制台默认使用流式输出。"
+  "调用当前配置的 DeepSeek 模型；交互式控制台默认使用流式输出。
+网络故障、429 限流、5xx 网关错误等临时性失败会自动重试（指数退避，
+上限 *http-max-attempts* 次，可用 MYAGENT_HTTP_RETRIES 覆盖）；
+一旦流式内容已经开始输出，就不再重试，避免重复显示。"
   (let ((config (resolve-llm-config)))
-    (if (stream-mode-active-p)
-        (or (send-deepseek-request-stream config system messages tools)
-            ;; 被中断：返回占位响应，主线程会按 :cancelled 处理并丢弃
-            (jobj "content" nil
-                  "usage" (jobj "input_tokens" 0 "output_tokens" 0)
-                  "stop_reason" "cancelled"))
-        (send-deepseek-request config system messages tools))))
+    (do-with-http-retry
+     "LLM 请求"
+     (lambda ()
+       (setf *stream-output-started* nil)
+       (if (stream-mode-active-p)
+           (let ((res (send-deepseek-request-stream config system messages tools)))
+             (cond
+               ((null res) res)
+               ((equal (jget res "stop_reason") "cancelled") res)
+               ;; 流式一个事件都没收到：多半是网关/限流把错误当普通 JSON 返回，重试通常可恢复
+               ((and (null (jget res "content")) (not *stream-output-started*))
+                (error 'http-retryable-error
+                       :message "流式响应为空（可能被限流或网关错误）"))
+               (t res)))
+           (send-deepseek-request config system messages tools)))
+     :no-retry-p (lambda () *stream-output-started*))))

@@ -537,6 +537,111 @@
   (handler-case (markdown-to-ansi (or text ""))
     (error () (or text ""))))
 
-(defun print-markdown (text &optional (stream *standard-output*))
-  (write-string (render-markdown text) stream)
-  (finish-output stream))
+;;; ── 流式渲染（SSE 正文增量逐行渲染） ─────────────────────
+;;;
+;;; 背景：llm-client 的流式输出原先直接把 text_delta 原样写到终端，
+;;; 屏幕上出现的永远是未渲染的 Markdown（**粗体**、``` 围栏、| 表格）。
+;;; 这里提供一个按行累积的流式渲染器：
+;;;   - 普通行（标题 / 列表 / 引用 / 段落 / 分割线）立即渲染输出；
+;;;   - 代码围栏按状态逐行渲染；
+;;;   - 表格必须整块对齐，先缓存，遇到非表格行或流结束时统一输出。
+
+(defun md-render-plain-line (raw &optional (out *standard-output*))
+  "渲染一行非代码、非表格的 Markdown（空行 / 标题 / 分割线 / 引用 / 列表 / 段落）。"
+  (let* ((trimmed (string-left-trim '(#\Space #\Tab) raw))
+         (hmv (multiple-value-list (md-heading raw)))
+         (hlevel (first hmv))
+         (htext (second hmv))
+         (pad (make-string (md-leading-spaces raw) :initial-element #\Space)))
+    (cond
+      ((zerop (length trimmed))
+       (terpri out))
+      ((> hlevel 0)
+       (let ((body (md-inline htext)))
+         (format out "~A~%"
+                 (cond ((= hlevel 1) (md-wrap "1;4;36" (format nil "◆ ~A" body)))
+                       ((= hlevel 2) (md-wrap "1;36" (format nil "◇ ~A" body)))
+                       ((= hlevel 3) (md-wrap "36" (format nil "● ~A" body)))
+                       (t (md-wrap "36" (format nil "· ~A" body)))))))
+      ((md-hr-p trimmed)
+       (format out "~A~%" (md-gray (make-string 52 :initial-element #\─))))
+      ((md-quote-p trimmed)
+       (let ((body (string-left-trim '(#\Space #\Tab #\>) (subseq trimmed 1))))
+         (format out "~A~%" (md-gray (format nil "  │ ~A" body)))))
+      ((md-ulist-p trimmed)
+       (format out "~A~%" (format nil "~A~A ~A"
+                                  pad (md-gray "•")
+                                  (md-inline (subseq trimmed 2)))))
+      ((md-olist trimmed)
+       (let* ((dot (md-olist trimmed))
+              (num (subseq trimmed 0 (1+ dot)))
+              (body (subseq trimmed (+ dot 2))))
+         (format out "~A~%" (format nil "~A~A ~A"
+                                    pad (md-cyan num) (md-inline body)))))
+      (t (format out "~A~%" (md-inline raw))))))
+
+(defstruct (md-stream (:constructor md-stream-start))
+  "流式 Markdown 渲染状态：跨增量保留未完成行、代码围栏与待输出表格。"
+  (pending "" :type string)
+  (in-code nil)
+  (table nil))
+
+(defun md-stream-flush-table (st)
+  "把缓存的表格块整体渲染输出（表格必须整块对齐，不能逐行输出）。"
+  (let ((rows (md-stream-table st)))
+    (when rows
+      (setf (md-stream-table st) nil)
+      (write-string (md-render-table (nreverse rows)))
+      (terpri))))
+
+(defun md-stream-emit-line (raw st)
+  "渲染一个完整行；表格行先入缓存，其余立即输出。"
+  (let ((trimmed (string-left-trim '(#\Space #\Tab) raw)))
+    (cond
+      ((md-prefix-p "```" trimmed)
+       (md-stream-flush-table st)
+       (if (md-stream-in-code st)
+           (progn (format t "~A~%" (md-gray "  └────────"))
+                  (setf (md-stream-in-code st) nil))
+           (let ((lang (string-trim '(#\Space #\Tab) (subseq trimmed 3))))
+             (setf (md-stream-in-code st) t)
+             (format t "~A~%"
+                     (md-gray (format nil "  ┌── ~A"
+                                      (if (zerop (length lang)) "code" lang)))))))
+      ((md-stream-in-code st)
+       (format t "~A~%" (md-wrap "37" (format nil "  │ ~A" raw))))
+      ((md-table-p trimmed)
+       (push raw (md-stream-table st)))
+      (t
+       (md-stream-flush-table st)
+       (md-render-plain-line raw)))))
+
+(defun md-stream-feed (st text)
+  "喂入一段正文增量：已完整的行立即渲染，半行留在缓冲里等待后续增量。"
+  (let* ((buf (concatenate 'string (md-stream-pending st) (or text "")))
+         (start 0))
+    (loop
+      (let ((nl (position #\Newline buf :start start)))
+        (if nl
+            (progn
+              (md-stream-emit-line
+               (string-right-trim '(#\Return) (md-clean-text (subseq buf start nl))) st)
+              (setf start (1+ nl)))
+            (return))))
+    (setf (md-stream-pending st) (subseq buf start))
+    (finish-output))
+  st)
+
+(defun md-stream-finish (st)
+  "流结束：输出剩余半行、未输出的表格，并补齐未闭合的代码围栏。"
+  (let ((rest (md-stream-pending st)))
+    (when (plusp (length rest))
+      (setf (md-stream-pending st) "")
+      (md-stream-emit-line (string-right-trim '(#\Return) (md-clean-text rest)) st)))
+  (md-stream-flush-table st)
+  (when (md-stream-in-code st)
+    (setf (md-stream-in-code st) nil)
+    (format t "~A~%" (md-gray "  └────────")))
+  (finish-output)
+  st)
+

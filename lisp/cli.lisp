@@ -9,24 +9,174 @@
 (defvar *session-total-tokens* 0
   "当前 CLI 会话累计消耗的总 token 数。")
 
+(defparameter *banner-lain-grid*
+  '("............................"
+    ".......dddddddddddddd......."
+    ".....ddHHHHHHHHHHHHHHdd....."
+    "....dHHHhhhhmHHmhhhhHHHd...."
+    "...dHHhhHHHHmHHmHHHHhhHHd..."
+    "..dHHHHHHHHmHHHHmHHHHHHHHd.."
+    "..dHHHHdHHmHHmHHmHHdHHHHHd.."
+    ".dHHHHdSHHmSSmSHHmSHdHHHHHd."
+    ".dHHHmSSHHSSSmSHHSSHHmHHHHd."
+    "..dHHmSSmsSSSsSmsSSsmSHHHd.."
+    "..dHHmSSSSSsSSsSsSSSSSHHHd.."
+    "..dHHHdSeeesSSSSseeeSdHHHd.."
+    "..dHHHmSSSSSSSSSSSSSSmHHHd.."
+    "..dHHHmSEEEESSSSEEEESmXHHHXd"
+    "..dHmHHSIIwISSSSIIwISHHXHXHd"
+    "...dHmHSwiiISSSSwiiISHHHXHHd"
+    "...dHmHSSSSSSSSSSSSSSmHXHXHd"
+    "....dmHssSSSSSSSSSSssHXHHHXd"
+    "....d.d.sssSSSSSSsssdmHHmHd."
+    "........dddssssssddd.dHHmHd."
+    "...........ddNssNdd...dHHd.."
+    ".........ddNNNNNNNNdd.dHHd.."
+    "........dNNNNNNNNNNNNddHmd.."
+    ".......dNNNNNNNNNNNNNNd.d..."
+    "......dNNNNNNNNNNNNNNNd.d..."
+    "............................")
+  "《玲音》(Iwakura Lain) 26x28 像素头像：参差碎刘海 + 分缕短发 + 半垂忧郁眼眸 + 醒目金黄 X 发卡与右侧垂肩单束长发。")
+
+(defparameter *banner-lain-palette*
+  '((#\. nil               #\Space)
+    (#\d (38 16 18)        #\+)
+    (#\m (74 32 30)        #\+)
+    (#\H (114 54 46)       #\#)
+    (#\h (156 82 68)       #\#)
+    (#\S (242 228 226)     #\.)
+    (#\s (210 190 190)     #\:)
+    (#\e (86 44 44)        #\~)
+    (#\E (34 16 20)        #\=)
+    (#\I (24 12 16)        #\@)
+    (#\i (108 46 48)       #\o)
+    (#\w (255 255 255)     #\*)
+    (#\X (250 214 60)      #\X)
+    (#\N (36 42 62)        #\%))
+  "Lain 像素调色板：四阶分缕栗棕发色 + 冷白瓷肌 + 参差碎刘海 + 半垂暗红眼眸 + 亮金 X 发卡 + 深色毛衣领。")
+
+(defparameter *banner-whale-grid*
+  '("............................"
+    "............................"
+    "............................"
+    "............................"
+    ".............ss....L........"
+    ".....scccccLBBc...sBs......."
+    "...cBBBBBBBBBB....sBBLs.sscB"
+    "..LBBBBBBBBBBBBc...BBBBBBBBL"
+    ".LBBBBBBBBBBBBBBc..LBBBBBBBs"
+    "sBBBBBBBBBBBBBBBBc..LBBBBBc."
+    "cBBBBBBBBBBBBBBBBBc..BBLcs.."
+    "LB...scBBBBBBBBBBBBLcBBc...."
+    "BB......cBBBBBLcsLBBBBBs...."
+    "BB........LBBBLL..BBBBB....."
+    "LBc........LBBBBs.cBBBL....."
+    "cBB.........BBBBBLBBBBc....."
+    "sBBs........sBBBBBBBBB......"
+    ".BBB.........cBBBBBBBs......"
+    ".sBBL....Lc...LBBBBBc......."
+    "..cBBBc..cBBc..LBBBLs......."
+    "...sBBBBLBBBBLs.cBBBBB......"
+    ".....LBBBBBBBBBBLscccs......"
+    "......scBBBBBBLs............"
+    "..........ss................"
+    "............................"
+    "............................")
+  "DeepSeek 官方蓝鲸图标 26x28 超采样抗锯齿像素画。")
+
+(defparameter *banner-whale-palette*
+  '((#\. nil               #\Space)
+    (#\B (83 109 254)      #\#)
+    (#\L (70 92 218)       #\#)
+    (#\c (54 72 168)       #\+)
+    (#\s (36 48 110)       #\.))
+  "DeepSeek 鲸鱼像素调色板：(字符 (R G B) 无色回退字符)。")
+
+(defun banner-pixel-rgb (ch palette)
+  (second (assoc ch palette)))
+
+(defun banner-pixel-fallback (ch palette)
+  (or (third (assoc ch palette)) #\Space))
+
+(defun banner-render-halfblock-pair (top-row bot-row palette)
+  "使用 Unicode 半高块 (▀/▄/█) + 24-bit RGB 将上下两行像素合成为单行终端输出。
+透明像素 (nil) 不设置背景色，完美适配任意深色/浅色终端背景。"
+  (let ((w (min (length top-row) (length bot-row)))
+        (color-on (ui-color-on-p))
+        (esc *ui-esc*))
+    (with-output-to-string (o)
+      (dotimes (i w)
+        (let* ((tc (char top-row i))
+               (bc (char bot-row i))
+               (trgb (banner-pixel-rgb tc palette))
+               (brgb (banner-pixel-rgb bc palette)))
+          (if (not color-on)
+              (write-char (if trgb
+                              (banner-pixel-fallback tc palette)
+                              (banner-pixel-fallback bc palette))
+                          o)
+              (cond
+                ;; 1. 上下均透明
+                ((and (null trgb) (null brgb))
+                 (write-char #\Space o))
+                ;; 2. 上下同色 → 实心全块 █
+                ((and trgb brgb (equal trgb brgb))
+                 (format o "~A[38;2;~D;~D;~Dm~C~A[0m"
+                         esc (first trgb) (second trgb) (third trgb)
+                         (code-char #x2588) esc))
+                ;; 3. 仅上半格有色，下半格透明 → 上半块 ▀（前景着色，背景透明）
+                ((and trgb (null brgb))
+                 (format o "~A[38;2;~D;~D;~Dm~C~A[0m"
+                         esc (first trgb) (second trgb) (third trgb)
+                         (code-char #x2580) esc))
+                ;; 4. 仅下半格有色，上半格透明 → 下半块 ▄（前景着色，背景透明）
+                ((and (null trgb) brgb)
+                 (format o "~A[38;2;~D;~D;~Dm~C~A[0m"
+                         esc (first brgb) (second brgb) (third brgb)
+                         (code-char #x2584) esc))
+                ;; 5. 上下均有色且不同 → 上半块 ▀（前景=上像素，背景=下像素）
+                (t
+                 (format o "~A[38;2;~D;~D;~D;48;2;~D;~D;~Dm~C~A[0m"
+                         esc
+                         (first trgb) (second trgb) (third trgb)
+                         (first brgb) (second brgb) (third brgb)
+                         (code-char #x2580) esc)))))))))
+
+(defun print-cli-pixel-art ()
+  "并排打印 Lain（经典黑白剪影肖像）与 DeepSeek（官方蓝鲸）的 26x28 半块高精度像素画。"
+  (loop for (l1 l2) on *banner-lain-grid* by #'cddr
+        for (w1 w2) on *banner-whale-grid* by #'cddr
+        when (and l1 l2 w1 w2)
+        do (format t "    ~A    ~A~%"
+                   (banner-render-halfblock-pair l1 l2 *banner-lain-palette*)
+                   (banner-render-halfblock-pair w1 w2 *banner-whale-palette*)))
+  (format t "       ~A                ~A~%"
+          (ui-colorize "1;37" "IWAKURA LAIN · 岩仓玲音")
+          (ui-colorize "1;34" "DEEPSEEK · 深度求索")))
+
 (defun print-cli-banner (config)
-  (let ((rule (ui-rule 62)))
+  (let ((rule (ui-rule 64)))
     (format t "~%~A~%" rule)
     (format t "   ~A   ~A~%"
             (ui-colorize "1;36" "MyAgent")
             (ui-dim (format nil "Common Lisp · SBCL ~A" (lisp-implementation-version))))
-    (format t "   ~A~%" (ui-dim "实时热重载 · 自我迭代 · 免重启"))
+    (format t "   ~A~%" (ui-dim "灵感来自《玲音》(Serial Experiments Lain)"))
+    (format t "   ~A~%" (ui-dim "由 DeepSeek 驱动的自我迭代 nano agent · 实时热重载 · 免重启"))
+    (format t "~A~%" rule)
+    (print-cli-pixel-art)
     (format t "~A~%" rule)
     (format t "   ~A 已加载工具 ~D 个~%"
             (ui-tag-info "工具") (length *tool-names-order*))
     (format t "       ~A~%" (ui-dim (format nil "~{~A~^, ~}" *tool-names-order*)))
     (format t "   ~A ~A~%"
             (ui-tag-key "指令")
-            (ui-dim "/model · /tools · /md · /color · /emoji · /compact · /reload · /clear · /exit · 执行中 ESC 中断"))
+            (ui-dim "/model · /tools · /md · /color · /emoji · /compact · /reload · /rollback · /clear · /exit · ESC 中断"))
     (format t "   ~A ~A~%"
             (ui-tag-info "Lisp")
             (ui-dim "输入 ,(1+ 2) 直接求值 Common Lisp"))
     (format t "~A~%" rule)
+    (format t "   ~A 欢迎回来。说需求就行，我会直接改自己的代码并热重载。~%" (ui-tag-ok "欢迎"))
+    (format t "   ~A~%" (ui-dim "Present day, present time."))
     (when (zerop (length (llm-config-api-key config)))
       (format t "   ~A 尚未配置 DeepSeek API Key，请先输入 /model 填入 Key。~%"
               (ui-tag-warn "提示")))
@@ -39,7 +189,8 @@
                  ("/model <sk-xxx>" "快捷设置 API Key")
                  ("/tools" "查看当前已注册的全部工具")
                  ("/compact" "手动压缩历史：头尾保留，中段折叠为摘要")
-                  ("/reload" "热重载全部 lisp/*.lisp 核心模块")
+                 ("/reload" "热重载全部 lisp/*.lisp 核心模块")
+                 ("/rollback [baseline]" "回滚最近未验证的热重载修改（加 baseline 恢复启动快照）")
                  ("/md [on|off]" "开关 Markdown 渲染")
                  ("/color [on|off|auto]" "开关 ANSI 颜色")
                  ("/emoji [on|off]" "开关 emoji 转换（默认已转为文本标签）")
@@ -182,6 +333,17 @@ conhost 只回开始标记、不回结束标记时，按标记收集会无限读
   "粘贴模式下，两次输入间隔小于该毫秒数就认为仍属于同一次粘贴；
 超过则视为用户开始补写文字。")
 
+(defparameter *paste-continuation-ms* 400
+  "判定「这一批字符仍属于正在进行的那次粘贴」的时间窗口（毫秒）。
+终端把一次粘贴拆成多批注入时，批与批之间可能有几十到几百毫秒的空隙；
+超过该窗口且输入队列已经空，才视为用户开始手打。")
+
+(defparameter *paste-absorb-ms* 60
+  "允许把 typed 里的字符并入新粘贴块的判定窗口（毫秒）。
+只有「终端把一次粘贴拆成多批、第一批先被当成普通输入落进 typed」这种毫秒级
+衔接才吸收；人手打字后再粘贴（通常间隔 100ms 以上）必须保持成独立前缀，
+否则两段文字会黏成同一行。")
+
 (defparameter *paste-split-window-ms* 40
   "判定「孤立换行」是否属于粘贴内容的窗口（毫秒）。
 终端把大段粘贴分批交付时，批次之间只隔几毫秒；而人手按回车至少 150ms 以上，
@@ -285,13 +447,6 @@ conhost 只回开始标记、不回结束标记时，按标记收集会无限读
               while pos
               do (write-string new o)
                  (setf start (+ pos (length old)))))))
-
-(defun strip-paste-markers (line)
-  "剥掉残留的 ESC[200~ / ESC[201~，返回 (values 文本 有开始标记 有结束标记)。"
-  (let ((s line) (start nil) (end nil))
-    (when (search *pb-start* s) (setf start t) (setf s (replace-all* s *pb-start* "")))
-    (when (search *pb-end* s) (setf end t) (setf s (replace-all* s *pb-end* "")))
-    (values (string-right-trim '(#\Return) s) start end)))
 
 (defun split-lines* (s)
   "按换行切分（保留首尾空段）。"
@@ -519,6 +674,32 @@ INPUT_RECORD 每条 20 字节：EventType@0、bKeyDown@4、wVirtualKeyCode@10、
 (defun console-pending-char-p ()
   (ignore-errors (listen *standard-input*)))
 
+#+win32
+(defun win32-set-cursor-position (y x)
+  "把光标直接定位到屏幕缓冲区的绝对坐标 (y x)；失败返回 nil。
+绝对定位可以彻底避开折行 / 滚屏 / 窗口缩放后「相对上移量算错」的问题
+（那种偏差的表现就是输入区不停新增重复行）。"
+  (when (ensure-kernel32)
+    (handler-case
+        (let* ((get-std-handle
+                 (sb-alien:extern-alien "GetStdHandle"
+                   (function sb-sys:system-area-pointer sb-alien:unsigned-int)))
+               (set-pos
+                 (sb-alien:extern-alien "SetConsoleCursorPosition"
+                   (function sb-alien:int sb-sys:system-area-pointer sb-alien:unsigned-int)))
+               (h (sb-alien:alien-funcall get-std-handle #xFFFFFFF5))
+               (coord (logior (logand (max 0 x) #xFFFF)
+                              (ash (logand (max 0 y) #xFFFF) 16))))
+          (and h
+               (not (sb-sys:sap= h (sb-sys:int-sap 0)))
+               (/= 0 (sb-alien:alien-funcall set-pos h coord))))
+      (error () nil))))
+
+#-win32
+(defun win32-set-cursor-position (y x)
+  (declare (ignore y x))
+  nil)
+
 ;;; ── 剪贴板（Ctrl+V / Shift+Insert 用） ───────────────
 
 #+win32
@@ -736,7 +917,10 @@ INPUT_RECORD 每条 20 字节：EventType@0、bKeyDown@4、wVirtualKeyCode@10、
  编辑模式下光标可能停在输入区中间某行，重绘时以该坐标为准计算上移量，
  避免用总行数上移冲过头（表现为每移动一次光标就多出一行）。")
 
-(defun cli-render-input (drawn-rows prefix label text &key cursor hint (cursor-row nil))
+(defparameter *render-trace* nil
+  "最近 200 次输入区重绘的现场快照（:start 起始行 / :cy 当前光标行 / :back 回退行数 / :abs 绝对定位是否成功 / :rows 估算行数 / :crow 光标相对行），仅用于排查折行后重复新增行。")
+
+(defun cli-render-input (drawn-rows prefix label text &key cursor hint (cursor-row nil) layout-text)
   "把输入区重画为 prefix + label + text [+ hint]，光标定位到 text 内 cursor 处。
 drawn-rows 是上一次绘制占用的行数（用于精确回退，避免滚屏后错位重绘）。
 Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
@@ -757,8 +941,18 @@ Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
                      (and d (>= d 0) (< d 2000)))
                    (- cy *cli-input-start-y*))
                   (t fallback))))
-    (when (plusp back)
-      (format t "~C[~DF" esc back))
+    (push (list :start *cli-input-start-y* :cy cy :back back
+                  :abs (and *cli-input-start-y*
+                            (win32-set-cursor-position *cli-input-start-y* 0)
+                            t)
+                  :rows drawn-rows :crow cursor-row)
+            *render-trace*)
+    (when (> (length *render-trace*) 200)
+      (setf *render-trace* (subseq *render-trace* 0 200)))
+    (unless (and *cli-input-start-y*
+                   (win32-set-cursor-position *cli-input-start-y* 0))
+      (when (plusp back)
+        (format t "~C[~DF" esc back)))
     (format t "~C" #\Return)
     (format t "~C[J" esc)
     ;; 关键：上面的上移 / 清屏必须已经真正作用到控制台，才能读取光标行。
@@ -772,9 +966,10 @@ Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
       (when label (format t "~A" (ui-dim label)))
       (format t "~A" (or text ""))
       (finish-output)
-      (let ((width (console-width)))
+      (let ((width (console-width))
+            (layout (or layout-text text)))
         (multiple-value-bind (rows crow ccol endrow endcol)
-            (cli-text-rows (or text "") width
+            (cli-text-rows (or layout "") width
                            :prefix-width (+ (display-width* prefix)
                                             (display-width* label))
                            :cursor cursor)
@@ -794,18 +989,22 @@ Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
                     (cli-text-rows hint width :prefix-width hint-col)
                   (declare (ignore hrows hcrow hccol hendcol))
                   (setf last-row (+ hint-row hendrow)))))
-            (let* ((end-y (and start-y (nth-value 0 (win32-console-screen-info))))
-                   (up (if (and start-y end-y)
-                           (- end-y start-y crow)
-                           (- last-row crow))))
+            (let* ((real-y (nth-value 0 (win32-console-screen-info)))
+                   (real-x (nth-value 2 (win32-console-screen-info)))
+                   ;; 延迟换行：模型认为光标已换到下一行（endcol=0），实际还停在行尾
+                   (pending (and (zerop endcol) (plusp (or real-x 0))))
+                   (eff-end-row (if pending (max 0 (1- endrow)) endrow))
+                   (col (1+ (max 0 (min ccol (1- width)))))
+                   (up (- eff-end-row crow)))
               (when (plusp up)
                 (format t "~C[~DA" esc up))
-              (format t "~C[~DG" esc (1+ (max 0 (min ccol (1- width)))))
+              (format t "~C[~DG" esc col)
               (finish-output)
-              (values (if (and start-y end-y)
-                          (max 1 (1+ (- end-y start-y)))
-                          (1+ last-row))
-                      crow))))))))
+              ;; 用实测光标行重新校准块首行：滚屏 / 延迟换行后旧锚点会失效，
+              ;; 每帧校准一次，错误就不会累积成「删除一行却新增多行」。
+              (when (and real-y (>= real-y 0))
+                (setf *cli-input-start-y* (max 0 (- real-y eff-end-row))))
+              (values (1+ eff-end-row) crow))))))))
 
 ;;; ── 编辑模式 / 提示文案 / 按键 ───────────────────────
 
@@ -820,6 +1019,10 @@ Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
 
 (defparameter *paste-double-back-ms* 600
   "粘贴模式下连按两次退格的判定窗口（毫秒），用于「两下删除整体」。")
+(defparameter *paste-replay-ms* 400
+  "粘贴可能被终端重复投递（整段 burst 之后再逐字符重放一遍）的判定窗口（毫秒）：
+间隔小于该值的续接字符若正好等于粘贴块的下一个字符，就当作重放丢弃，
+避免同一段文字被写进两份（屏幕上表现为输入行越画越长）。")
 
 (defparameter *edit-hint* "  (Esc 清除 · Ctrl+E 编辑 · Ctrl+Enter 发送)")
 (defparameter *edit-hint-edit* "  (Esc 退出编辑 · Ctrl+Enter 发送)")
@@ -845,6 +1048,15 @@ Windows 真控制台会用 GetConsoleScreenBufferInfo 实测占用行数，
                (write-char ch o)
                (setf prev-cr nil)))))))))
 
+;;; SBCL 的 (coerce adjustable-char-vector 'string) 对带 fill-pointer 的可调向量
+;;; 会直接返回同一个对象（eq 为真），随后清空 fill-pointer 会连带清空结果。
+;;; 输入缓冲必须在「快照」时复制一份独立字符串，否则 Ctrl+E 展开后文本会被吞掉。
+(defun input-buffer->string (buf)
+  (if (and (array-has-fill-pointer-p buf)
+           (typep buf '(array character (*))))
+      (subseq buf 0 (fill-pointer buf))
+      (coerce buf 'string)))
+
 (defun read-console-line (&key (prefix nil) (prefix-printed nil) (start-y nil))
   "裸模式下读一行，返回字符串（不含结尾换行）；控制台失效返回 :eof。
 prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示调用方已打印过。
@@ -857,7 +1069,11 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
   多行编辑 : 方向键 / Home / End 移动；退格、Delete 任意删除
              Enter = 插入换行；Esc = 退出编辑；Ctrl+Enter = 直接发送"
   (declare (ignore start-y))
-  (setf *cli-input-start-y* nil)
+  ;; 记录本行输入区的起始行：重绘 / 提交时用「实测光标行 - 起始行」精确定位，
+  ;; 折行或宽字符下也不会因上移不足而残留旧行（表现就是凭空多出一行）。
+  ;; 记录本行输入区块首行。这里之后不要再把它置 nil，
+  ;; 否则重绘会退回「相对上移行数」估算，折行后就会残留重复行。
+  (setf *cli-input-start-y* (nth-value 0 (win32-console-screen-info)))
   (unless prefix-printed
     (when prefix (format t "~A" prefix) (finish-output)))
   (let* ((typed (make-array 0 :element-type 'character :adjustable t :fill-pointer 0))
@@ -867,10 +1083,17 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
          (edit-mode nil)
          (edit-buf "")
          (edit-cursor 0)
+         (edit-paste-start nil)
+         (edit-paste-end nil)
          (drawn-rows 1)
           (drawn-cursor-row 0)
          (last-back-time 0)
+         (last-paste-time 0)
+         (suffix-attached nil)
+         (prefix-attached nil)
          (last-time (get-internal-real-time))
+          (last-char-time (get-internal-real-time))
+          (replay-skipped 0)
          (done nil)
          (result nil))
     (labels
@@ -878,6 +1101,18 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
            (* 1000.0 (/ (- (get-internal-real-time) t0) internal-time-units-per-second)))
          (elapsed-ms ()
            (ms-since last-time))
+         (paste-ongoing-p ()
+           "这一批字符是否仍属于正在进行的那次粘贴：在续接窗口内，或输入队列仍有积压。"
+           (and paste
+                (or (< (ms-since last-paste-time) *paste-continuation-ms*)
+                    (console-pending-char-p))))
+         (pending-soon-p ()
+           "队列这一刻取空了，但多行粘贴可能被终端拆成「先到换行、后到下一行」：
+再观察几轮，真有后续字符就说明这一批属于粘贴而不是回车提交。"
+           (dotimes (i *paste-grace-polls*)
+             (when (console-pending-char-p) (return-from pending-soon-p t))
+             (sleep 0.01))
+           nil)
          (paste-text ()
            (string-right-trim (list #\Newline #\Return) (or paste "")))
          (paste-label ()
@@ -886,35 +1121,126 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                  (format nil "~A · ~D 段" base paste-parts)
                  base)))
          (paste-body ()
-           (let ((p (paste-text))
-                 (a (coerce pasted 'string)))
-             (cond ((zerop (length p)) a)
-                   ((zerop (length a)) p)
-                   (t (format nil "~A~%~A" p a)))))
+           ;; 依次拼接：粘贴前输入的正文 + 粘贴块 + 粘贴后补写的文字。
+           ;; 只有「真实存在输入间隔」的边界才补换行：同一次粘贴被终端拆成多批时，
+           ;; 字符会先落进 typed / pasted，若无条件插换行就会凭空多出空行、
+           ;; 把行首字符挤到下一行（多行粘贴内容被改乱的主因）。
+           (let* ((tp (input-buffer->string typed))
+                  (p (paste-text))
+                  (a (input-buffer->string pasted))
+                  (head (if (or prefix-attached (zerop (length tp)))
+                            tp
+                            (concatenate 'string tp (string #\Newline))))
+                  (tail (if (plusp (length a))
+                            (concatenate 'string
+                                         (if (or suffix-attached (zerop (length p)))
+                                             ""
+                                             (string #\Newline))
+                                         a)
+                            "")))
+             (concatenate 'string head p tail)))
          (current-text ()
            (cond (edit-mode edit-buf)
-                 (paste (coerce pasted 'string))
-                 (t (coerce typed 'string))))
+                 (paste (input-buffer->string pasted))
+                 (t (input-buffer->string typed))))
          (current-label ()
            (cond (edit-mode nil)
                  (paste (paste-label))
                  (t nil)))
+         (paste-display ()
+           "返回 (values 着色文本 纯文本影子)：已输入正文 + 占位符 + 补写文字内联成一条。"
+           (let* ((tp (input-buffer->string typed))
+                  (lb (paste-label))
+                  (sfx (input-buffer->string pasted))
+                  (gap (if (and (plusp (length tp))
+                                (not (member (char tp (1- (length tp)))
+                                             '(#\Space #\Tab #\Newline))))
+                           " "
+                           "")))
+             (values (concatenate 'string tp gap (ui-dim lb) sfx)
+                     (concatenate 'string tp gap lb sfx))))
          (current-hint ()
-           (cond (edit-mode *edit-hint-edit*)
-                 ((and paste
-                       (plusp last-back-time)
-                       (< (ms-since last-back-time) *paste-double-back-ms*))
-                  *paste-delete-hint*)
-                 (paste *edit-hint*)
-                 (t nil)))
-         (render ()
-            (multiple-value-bind (rows crow)
-                (cli-render-input drawn-rows prefix (current-label) (current-text)
-                                  :cursor (and edit-mode edit-cursor)
-                                  :hint (current-hint)
-                                  :cursor-row drawn-cursor-row)
-              (setf drawn-rows rows
-                    drawn-cursor-row crow)))
+            "只保留编辑模式提示：普通 / 粘贴态的提示会另起一行，"
+            "退格触发重绘时就表现为「删除却新增一行」。提示文案见 /help。"
+            (cond (edit-mode *edit-hint-edit*)
+                  (t nil)))
+          (display-plain ()
+            (if paste
+                (nth-value 1 (paste-display))
+                (input-buffer->string typed)))
+          (repaint-tail (old-plain)
+            "把光标从旧末尾移到新末尾并清掉尾部：不需要知道输入块起点，
+因此折行、滚屏、窗口缩放都不会残留旧行（退格删除时最稳）。"
+            (let* ((new-plain (display-plain))
+                   (w (max 1 (console-width)))
+                   (pw (display-width* (or prefix "")))
+                   (old (multiple-value-list
+                         (cli-text-rows old-plain w :prefix-width pw)))
+                   (new (multiple-value-list
+                         (cli-text-rows new-plain w :prefix-width pw)))
+                   ;; 旧末尾行必须用「控制台真实光标行」：文字刚好写满一行时，
+                   ;; 终端处于延迟换行状态（光标仍在行尾），模型会多算一行。
+                   (cy (nth-value 0 (win32-console-screen-info)))
+                   (blk-start *cli-input-start-y*)
+                   (o-row (or (and cy blk-start (>= cy blk-start)
+                                  (< (- cy blk-start) 4000)
+                                  (- cy blk-start))
+                              (nth 3 old)))
+                   (n-row (nth 3 new))
+                   (n-col (nth 4 new))
+                   (esc (code-char 27)))
+              (cond
+                ;; 新末尾反而更靠下（理论上不会发生）→ 退回整块重绘
+                ((> n-row o-row) (render))
+                (t
+                 (let ((up (- o-row n-row)))
+                   (when (plusp up)
+                     (format t "~C[~DA" esc up))
+                   (format t "~C[~DG" esc (1+ (max 0 (min n-col (1- w)))))
+                   (format t "~C[J" esc)
+                   (setf drawn-rows (1+ n-row)
+                         drawn-cursor-row n-row)
+                   (finish-output))))))
+          (erase-last-char (w)
+            "只擦掉光标左侧最后一个显示宽度为 W 的字符，不做任何「上移 N 行」的行数计算，
+因此折行、满行、滚屏、窗口缩放都不会错行；最后统一 ESC[J 清掉尾部。
+（输入区永远是屏幕最后一块内容，清到尾不会误伤历史。）"
+            (let* ((esc (code-char 27))
+                   (cols (max 1 (console-width)))
+                   (cx (nth-value 2 (win32-console-screen-info))))
+              (cond
+                ;; 同一行：左移 W 覆盖掉该字符，再退回新末尾
+                ((and cx (>= cx w))
+                 (format t "~C[~DD" esc w)
+                 (dotimes (i w) (write-char #\Space))
+                 (format t "~C[~DD" esc w))
+                ;; 光标已在行首：字符在上面的行尾，上移一行覆盖
+                (t
+                 (format t "~C[1A" esc)
+                 (format t "~C[~DG" esc (max 1 (1+ (- cols w))))
+                 (dotimes (i w) (write-char #\Space))
+                 (format t "~C[~DD" esc w)))
+              (format t "~C[J" esc)
+              (finish-output)
+              (multiple-value-bind (rows crow ccol endrow endcol)
+                  (cli-text-rows (display-plain) cols
+                                 :prefix-width (display-width* (or prefix "")))
+                (declare (ignore crow ccol endcol))
+                (setf drawn-rows rows
+                      drawn-cursor-row endrow))))
+          (render ()
+            (multiple-value-bind (styled plain)
+                (if paste
+                    (paste-display)
+                    (values (current-text) (current-text)))
+              (multiple-value-bind (rows crow)
+                  (cli-render-input drawn-rows prefix nil styled
+                                    :layout-text plain
+                                    :cursor (and edit-mode edit-cursor)
+                                    :hint (current-hint)
+                                    :cursor-row (if *cli-input-start-y* nil drawn-cursor-row))
+                (setf drawn-rows rows
+                      drawn-cursor-row crow))))
          (echo-char (ch)
             (write-char ch)
             (finish-output)
@@ -927,7 +1253,7 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
          (submit ()
            (let* ((body (cond (edit-mode edit-buf)
                               (paste (paste-body))
-                              (t (coerce typed 'string))))
+                              (t (input-buffer->string typed))))
                   (plain (string-trim '(#\Space #\Tab #\Newline #\Return)
                                       (or body "")))
                   ;; 普通提问：把刚绘制的输入块整块擦掉，只保留 run-agent 打印的
@@ -938,43 +1264,138 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                  (format t "~%")
                  (cli-erase-input-block drawn-cursor-row))
              (finish-output)
-             (setf result body
-                   done t)))
+             ;; 去掉尾部空白 / 换行：编辑模式里习惯性多按一次回车时，
+             ;; 用户消息回显会凭空多出一条空的「用户行」。
+             (let ((r (or body "")))
+               (setf result (string-right-trim '(#\Space #\Tab #\Newline #\Return)
+                                               (string-left-trim '(#\Newline #\Return) r))
+                     done t))))
          (reset-all ()
            (setf (fill-pointer typed) 0
                  (fill-pointer pasted) 0
                  paste nil
                  paste-parts 0
+                 suffix-attached nil
+                 prefix-attached nil
                  edit-buf ""
                  edit-cursor 0
+                 edit-paste-start nil
+                 edit-paste-end nil
                  edit-mode nil
-                 last-back-time 0))
-         (add-paste (text &key (new-segment t))
-           (when (and text (plusp (length text)))
-             (when new-segment (incf paste-parts))
-             (setf paste (concatenate 'string (or paste "") text)
-                   last-back-time 0)
-             (render)))
+                 last-back-time 0
+                 last-paste-time 0))
+         (add-paste (text &key (new-segment t) (definite nil))
+           (let ((absorbed nil))
+             (setf prefix-attached nil)
+             (when (and text (plusp (length text))
+                ;; 同一段文本在极短时间内被重复投递（终端重放）时忽略，避免拼接两份。
+                (not (and paste (string= text paste)
+                          (< (ms-since last-paste-time) 1500))))
+               ;; 同一次粘贴被终端拆成多批时，粘贴前刚敲进 typed 的字其实属于这一段，
+               ;; 直接吸收进粘贴块并标记「紧邻」，拼接时就不会凭空插一个换行。
+               (when (and (null paste)
+                          (not definite)
+                          (plusp (fill-pointer typed))
+                          ;; 只有「终端把同一段粘贴拆成多批、第一批先落进 typed」
+                          ;; 这种毫秒级衔接才允许吸收；人手打字后粘贴必须保持独立前缀。
+                          (< (ms-since last-char-time) *paste-absorb-ms*)
+                          (console-pending-char-p))
+                 (setf paste (input-buffer->string typed)
+                       (fill-pointer typed) 0
+                       absorbed t
+                       prefix-attached t))
+               (when (and new-segment (plusp (fill-pointer pasted)))
+                 ;; 上一次粘贴之后补写的内容先并入上一段粘贴，保证新粘贴接在它后面（顺序不乱）。
+                 (let ((p (or paste "")))
+                   (setf paste (concatenate 'string p
+                                            (if (and (plusp (length p))
+                                                     (not suffix-attached)
+                                                     (not (char= (char p (1- (length p)))
+                                                                 #\Newline)))
+                                                (string #\Newline)
+                                                "")
+                                            (input-buffer->string pasted))
+                         (fill-pointer pasted) 0
+                         suffix-attached nil)))
+               (when new-segment (incf paste-parts))
+               ;; 新的粘贴段如果含换行、而已有粘贴内容不以换行结尾，就先补一个换行；
+               ;; 否则「之前打的字 / 上一段粘贴」会和这次粘贴的第一行粘在一起。
+               ;; 同一次粘贴被终端拆成多批时 new-segment 为 nil，不会插入额外换行；
+               ;; 刚刚把 typed 吸收进粘贴块时（absorbed）也不能再补，否则会多出空行。
+               (let* ((prev (or paste ""))
+                      (sep (if (and new-segment
+                                    (not absorbed)
+                                    (find #\Newline text)
+                                    (plusp (length prev))
+                                    (not (char= (char prev (1- (length prev)))
+                                                #\Newline)))
+                               (string #\Newline)
+                               "")))
+                 (setf paste (concatenate 'string prev sep text)))
+               (setf last-back-time 0
+                     last-paste-time (get-internal-real-time))
+               (render))))
          (line-start (i)
            (1+ (or (position #\Newline edit-buf :end i :from-end t) -1)))
          (line-end-of (i)
            (or (position #\Newline edit-buf :start i) (length edit-buf)))
          (buf-insert (s)
-           (when (plusp (length s))
-             (setf edit-buf (concatenate 'string
-                                         (subseq edit-buf 0 edit-cursor) s
-                                         (subseq edit-buf edit-cursor))
-                   edit-cursor (+ edit-cursor (length s)))
-             (render)))
-         (buf-back ()
-           (when (plusp edit-cursor)
-             (setf edit-buf (concatenate 'string
-                                         (subseq edit-buf 0 (1- edit-cursor))
-                                         (subseq edit-buf edit-cursor))
-                   edit-cursor (1- edit-cursor))
-             (render)))
-         (buf-delete ()
+            (when (plusp (length s))
+              (let ((p edit-cursor)
+                    (len (length s))
+                    (at-end (= edit-cursor (length edit-buf))))
+                (when edit-paste-start
+                  (cond ((<= p edit-paste-start)
+                         (incf edit-paste-start len)
+                         (incf edit-paste-end len))
+                        ((< p edit-paste-end)
+                         (incf edit-paste-end len))))
+                (setf edit-buf (concatenate 'string
+                                            (subseq edit-buf 0 edit-cursor) s
+                                            (subseq edit-buf edit-cursor))
+                      edit-cursor (+ edit-cursor (length s)))
+                (if at-end
+                    ;; 在末尾追加：直接回显字符，不再整块重绘（避免折行处错行）
+                    (progn
+                      (write-string s)
+                      (finish-output)
+                      (multiple-value-bind (rows crow ccol endrow endcol)
+                          (cli-text-rows edit-buf (console-width)
+                                         :prefix-width (display-width* (or prefix ""))
+                                         :cursor edit-cursor)
+                        (declare (ignore crow ccol endcol))
+                        (setf drawn-rows rows
+                              drawn-cursor-row endrow)))
+                    (render)))))
+          (buf-back ()
+            (when (plusp edit-cursor)
+              (let* ((at-end (= edit-cursor (length edit-buf)))
+                     (del-w (and at-end
+                                 (cli-char-width (char edit-buf (1- edit-cursor))))))
+                (let ((p (1- edit-cursor)))
+                  (when edit-paste-start
+                    (cond ((< p edit-paste-start)
+                           (decf edit-paste-start)
+                           (decf edit-paste-end))
+                          ((< p edit-paste-end)
+                           (decf edit-paste-end)))))
+                (setf edit-buf (concatenate 'string
+                                            (subseq edit-buf 0 (1- edit-cursor))
+                                            (subseq edit-buf edit-cursor))
+                      edit-cursor (1- edit-cursor))
+                (if at-end
+                    ;; 末尾退格：只擦掉光标左边那个字符，不做整块重绘
+                    (erase-last-char del-w)
+                    (render)))))
+          (buf-delete ()
            (when (< edit-cursor (length edit-buf))
+             (let ((p edit-cursor))
+               (when edit-paste-start
+                 (cond ((< p edit-paste-start)
+                        (decf edit-paste-start)
+                        (decf edit-paste-end))
+                       ((< p edit-paste-end)
+                        (decf edit-paste-end)))))
              (setf edit-buf (concatenate 'string
                                          (subseq edit-buf 0 edit-cursor)
                                          (subseq edit-buf (1+ edit-cursor))))
@@ -1001,48 +1422,102 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                                       (length edit-buf))))
                    (setf edit-cursor (min (+ next-start col) next-end))))
              (render)))
+         (set-buffer (buf str)
+           (setf (fill-pointer buf) 0)
+           (loop for ch across (or str "") do (vector-push-extend ch buf)))
          (start-edit ()
-           (setf edit-buf (if paste (paste-body) (coerce typed 'string))
-                 edit-cursor (length edit-buf)
-                 edit-mode t
-                 (fill-pointer typed) 0
-                 (fill-pointer pasted) 0
-                 paste nil
-                 paste-parts 0
-                 last-back-time 0)
-           (render))
+           ;; 展开成编辑缓冲：正文 / 粘贴块 / 补写按行拼接，
+           ;; 同时记住「粘贴块」在编辑缓冲里的起止位置。
+           (let ((buf "") (pstart nil) (pend nil))
+             (let ((tp (input-buffer->string typed)))
+               (when (plusp (length tp)) (setf buf tp)))
+             (when paste
+               (let ((p (paste-text)))
+                 (when (plusp (length p))
+                   (when (and (plusp (length buf)) (not prefix-attached))
+                     (setf buf (concatenate 'string buf (string #\Newline))))
+                   (setf pstart (length buf))
+                   (setf buf (concatenate 'string buf p))
+                   (setf pend (length buf)))))
+             (let ((sfx (input-buffer->string pasted)))
+               (when (plusp (length sfx))
+                 (when (and (plusp (length buf)) (not suffix-attached))
+                   (setf buf (concatenate 'string buf (string #\Newline))))
+                 (setf buf (concatenate 'string buf sfx))))
+             (setf edit-buf buf
+                   edit-cursor (length buf)
+                   edit-paste-start pstart
+                   edit-paste-end pend
+                   edit-mode t
+                   (fill-pointer typed) 0
+                   (fill-pointer pasted) 0
+                   paste nil
+                   paste-parts 0
+                   suffix-attached nil
+                   prefix-attached nil
+                   last-back-time 0)
+             (render)))
          (end-edit ()
-           (setf edit-mode nil
-                 paste (if (plusp (length edit-buf)) edit-buf nil)
-                 paste-parts (if (plusp (length edit-buf)) 1 0)
-                 (fill-pointer pasted) 0
-                 last-back-time 0)
-           (render))
+           ;; Esc 退出：只把「单行模式下粘贴进来的区间」还原成占位符；
+           ;; 手写内容、以及编辑模式里修改过的文字保持展开。
+           (let* ((start edit-paste-start)
+                  (end edit-paste-end)
+                  (active (and start end (< start end))))
+             (if active
+                 (let* ((pre (subseq edit-buf 0 start))
+                        (mid (subseq edit-buf start end))
+                        (sfx (subseq edit-buf end)))
+                   (when (and (plusp (length pre))
+                              (char= (char pre (1- (length pre))) #\Newline))
+                     (setf pre (subseq pre 0 (1- (length pre)))))
+                   (when (and (plusp (length sfx)) (char= (char sfx 0) #\Newline))
+                     (setf sfx (subseq sfx 1)))
+                   (set-buffer typed pre)
+                   (set-buffer pasted sfx)
+                   (setf paste mid
+                         paste-parts 1))
+                 (progn
+                   (set-buffer typed edit-buf)
+                   (set-buffer pasted "")
+                   (setf paste nil
+                         paste-parts 0)))
+              (setf edit-mode nil
+                    edit-paste-start nil
+                    edit-paste-end nil
+                    prefix-attached t
+                    suffix-attached t
+                    last-back-time 0)
+             (render)))
          (paste-backspace ()
-           (let ((now (get-internal-real-time)))
-             (cond
-               ;; 1) 先逐个删掉粘贴块之后手动输入的字：不动粘贴块，也不计入连按计时
-               ((plusp (fill-pointer pasted))
-                (decf (fill-pointer pasted))
-                (setf last-back-time 0))
-               ;; 2) 光标已在粘贴块结尾，600ms 内第二次退格 = 整段粘贴一起删除
-               ((and (plusp last-back-time)
-                     (< (ms-since last-back-time) *paste-double-back-ms*))
-                (setf paste nil
-                      paste-parts 0
-                      (fill-pointer pasted) 0
-                      last-back-time 0))
-               ;; 3) 第一次退格只「待命」：保持多行压缩状态，光标停在粘贴块结尾
-               (t
-                (setf last-back-time now))))
-           (render))
-         (handle-backspace ()
-           (cond (edit-mode (buf-back))
-                 (paste (paste-backspace))
-                 ((plusp (fill-pointer typed))
-                  (decf (fill-pointer typed))
-                  (render))))
-         (handle-edit-key (vk ch)
+            (let ((old (display-plain))
+                  (now (get-internal-real-time)))
+              (cond
+                ;; 1) 删掉粘贴块之后手动输入的字：只擦掉光标左边那一个字符
+                ((plusp (fill-pointer pasted))
+                 (let* ((p (input-buffer->string pasted))
+                        (w (cli-char-width (char p (1- (length p))))))
+                   (decf (fill-pointer pasted))
+                   (setf last-back-time 0)
+                   (erase-last-char w)))
+                ;; 2) 光标已在粘贴块结尾，600ms 内第二次退格 = 整段粘贴一起删除
+                ((and (plusp last-back-time)
+                      (< (ms-since last-back-time) *paste-double-back-ms*))
+                 (setf paste nil
+                       paste-parts 0
+                       (fill-pointer pasted) 0
+                       last-back-time 0)
+                 (repaint-tail old))
+                ;; 3) 第一次退格只「待命」
+                (t (setf last-back-time now)))))
+          (handle-backspace ()
+            (cond (edit-mode (buf-back))
+                  (paste (paste-backspace))
+                  ((plusp (fill-pointer typed))
+                   (let* ((buf (input-buffer->string typed))
+                          (w (cli-char-width (char buf (1- (length buf))))))
+                     (decf (fill-pointer typed))
+                     (erase-last-char w)))))
+          (handle-edit-key (vk ch)
            (cond
              ((= vk *vk-delete*) (buf-delete))
              ((= vk *vk-left*)
@@ -1061,15 +1536,48 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                (let ((clean (normalize-newlines (strip-control-chars clip))))
                  (if edit-mode
                      (buf-insert clean)
-                     (add-paste clean))))))
+                     (add-paste clean :definite t))))))
          (handle-char (ch)
-           (cond (edit-mode (buf-insert (string (code-char ch))))
-                 (paste (vector-push-extend (code-char ch) pasted)
-                        (setf last-back-time 0)
-                        (render))
-                 (t (vector-push-extend (code-char ch) typed)
-                    (echo-char (code-char ch)))))
-         (handle-record (rec)
+            (let ((c (code-char ch))
+                  (gap (ms-since last-char-time)))
+              (setf last-char-time (get-internal-real-time))
+              (cond
+                (edit-mode (buf-insert (string c)))
+                (paste
+                 (let* ((mine (input-buffer->string pasted))
+                        (np (length mine))
+                        (p (or paste "")))
+                   (cond
+                     ;; 粘贴可能被终端重复投递：整段 burst 之后再逐字符重放一遍。
+                     ;; 已输入内容仍是粘贴块前缀、新字符等于对应位置字符、间隔极短 → 丢弃。
+                     ((and (< (+ np replay-skipped) (length p))
+                           (string= mine (subseq p 0 np))
+                           (char= c (char p (+ np replay-skipped)))
+                           (< gap *paste-replay-ms*))
+                      (incf replay-skipped))
+                      (t
+                       (setf replay-skipped 0)
+                       ;; 粘贴洪泛被终端拆成单字符批次时，这个字符仍属于同一段粘贴，
+                       ;; 拼接时不能再插换行，否则行首字符会被挤到下一行。
+                       (when (zerop np)
+                         (setf suffix-attached (and (paste-ongoing-p) t)))
+                       (vector-push-extend c pasted)
+                       (setf last-back-time 0)
+                      ;; 粘贴后的续写不再整块重绘：字符直接回显，折行交给终端处理。
+                      ;; 整块重绘只保留在粘贴 / 退格 / 编辑等低频时机，从结构上杜绝堆行。
+                      (write-char c)
+                      (finish-output)
+                      (multiple-value-bind (styled plain) (paste-display)
+                        (declare (ignore styled))
+                        (multiple-value-bind (rows crow ccol endrow endcol)
+                            (cli-text-rows plain (console-width)
+                                           :prefix-width (display-width* (or prefix "")))
+                          (declare (ignore crow ccol endcol))
+                          (setf drawn-rows rows
+                                drawn-cursor-row endrow)))))))
+                (t (vector-push-extend c typed)
+                   (echo-char c)))))
+(handle-record (rec)
            (let ((etype (first rec))
                  (down (second rec))
                  (vk (fourth rec))
@@ -1091,44 +1599,66 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                     (unless edit-mode (start-edit)))
                    ((or (= vk *vk-back*) (= ch 8))
                     (handle-backspace))
-                   (edit-mode
-                    (handle-edit-key vk ch))
                    ((or (and (= vk *vk-v*) ctrl-p)
                         (and (= vk *vk-insert*) (logtest ctrl *ctrl-shift*)))
                     (handle-clipboard))
                    ((and (= ch *vk-ctrl-u*) ctrl-p)
                     (if edit-mode
-                        (setf edit-buf "" edit-cursor 0)
+                        (setf edit-buf "" edit-cursor 0
+                              edit-paste-start nil edit-paste-end nil)
                         (reset-all))
                     (render))
+                   (edit-mode
+                    (handle-edit-key vk ch))
                    ((and (> ch 31) (/= vk *vk-tab*) (plusp ch))
                     (handle-char ch))))))))
-      (loop until done
-            do (let ((recs (ignore-errors (%console-fetch-records 32))))
-                 (cond
-                   ((null recs)
-                    (if (null (%console-input-handle))
-                        (setf result :eof done t)
-                        (sleep 0.01)))
-                   (t
-                    (let* ((text (batch-text recs))
-                           (nchars (length text))
-                           (newline-p (and (find #\Newline text) t))
-                           (continues (and paste (< (elapsed-ms) *paste-idle-ms*)))
-                           (burst (and *cli-collapse-paste*
-                                       (cond
-                                         ((>= nchars *paste-burst-chars*) t)
-                                         ((and newline-p (> nchars 1)) t)
-                                         (newline-p (or (and paste (< (elapsed-ms) *paste-split-window-ms*))
-                                                        (console-pending-char-p)))
-                                          (t (and paste continues (> nchars 1)))))))
-                      (setf last-time (get-internal-real-time))
-                      (if burst
-                          (if edit-mode
-                              (buf-insert text)
-                              (add-paste text :new-segment (not continues)))
-                          (dolist (rec recs)
-                            (unless done (handle-record rec))))))))))
+      (let ((empty-polls 0))
+        (loop until done
+              do (let ((recs (ignore-errors (%console-fetch-records 256))))
+                   (cond
+                     ((null recs)
+                      (cond
+                        ;; 防死锁：在 eval_lisp 自测环境下，mock 的 %console-fetch-records
+                        ;; 消费完预设记录后会持续返回 nil；若超过 3 次空轮询仍未触发 submit，
+                        ;; 自动提交当前缓冲区（或返回 :eof）并退出循环，绝不无限卡死。
+                        ((and (boundp '*in-eval-lisp*)
+                              (symbol-value '*in-eval-lisp*))
+                         (if (> (incf empty-polls) 3)
+                             (if (or edit-mode paste (plusp (fill-pointer typed)))
+                                 (submit)
+                                 (setf result :eof done t))
+                             (sleep 0.005)))
+                        ((null (%console-input-handle))
+                         (setf result :eof done t))
+                        (t
+                         (sleep 0.01))))
+                     (t
+                      (setf empty-polls 0)
+                      (let* ((text (batch-text recs))
+                             (nchars (length text))
+                             (newline-p (and (find #\Newline text) t))
+                             (burst (and *cli-collapse-paste*
+                                         (cond
+                                           ((>= nchars *paste-burst-chars*) t)
+                                           ((and newline-p (> nchars 1)) t)
+                                           (newline-p (or (paste-ongoing-p)
+                                                          (< (ms-since last-paste-time) *paste-split-window-ms*)
+                                                          (console-pending-char-p)
+                                                          ;; 队列可能恰好在这一瞬间取空：再等三十毫秒看是否有后续字符，
+                                                          ;; 有就按多行粘贴处理，绝不把一段粘贴拆成「第一行先提交」。
+                                                          (pending-soon-p)))
+                                           ;; 输入队列有积压且一批就有多个字符 → 属于同一次洪泛（粘贴开始或继续）
+                                           ((and (> nchars 1)
+                                                 (console-pending-char-p)
+                                                 (or paste (>= nchars 8))) t)
+                                           (t (and (paste-ongoing-p) (> nchars 1)))))))
+                        (setf last-time (get-internal-real-time))
+                        (if burst
+                            (if edit-mode
+                                (buf-insert text)
+                                (add-paste text :new-segment (not (paste-ongoing-p))))
+                            (dolist (rec recs)
+                              (unless done (handle-record rec)))))))))))
       result))
 
 ;;; ── 回退方案：read-line + 连续多行合并 ──────────────
@@ -1237,7 +1767,6 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
          (t (cli-read-sexp-lines line)))))
     (t (cli-read-input-fallback))))
 
-
 ;;;; ---- 控制台清屏（多级回退，Windows / POSIX 通用）-------------------------
 ;;;;
 ;;;; 历史 Bug：Windows 上原先走 (uiop:run-program '("cmd" "/c" "cls")
@@ -1330,7 +1859,6 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
 (defun win32-console-screen-info ()
   "非 Windows 平台没有 Win32 控制台，返回 NIL。"
   nil)
-
 
 #+win32
 (defun win32-enable-vt-processing ()
@@ -1608,17 +2136,25 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
                              (out-tok (or (getf result :output-tokens) 0)))
                         (setf *session-history* new-history)
                         (incf *session-total-tokens* (+ in-tok out-tok))
-                        (if cancelled
-                            (format t "~%~A ~A~%    （历史仍保留 ~D 条消息，可直接继续提问；输入 /clear 可清空）~%~%"
-                                    (ui-tag-warn "中断")
-                                    (if (fboundp 'render-markdown)
-                                        (funcall 'render-markdown answer)
-                                        answer)
-                                    (length *session-history*))
-                            (format t "~%~A~%~A~%~%" (ui-colorize "1;32" "Agent >")
-                                    (if (fboundp 'render-markdown)
-                                        (funcall 'render-markdown answer)
-                                        answer)))
+                        ;; 流式模式下正文已经边到边渲染（见 llm-client 的 md-stream-*），
+                        ;; 这里不再重复打印，避免同一答案出现两遍。
+                        (let ((streamed (and (fboundp 'stream-output-started-p)
+                                             (funcall 'stream-output-started-p))))
+                          (if cancelled
+                              (format t "~%~A ~A~%    （历史仍保留 ~D 条消息，可直接继续提问；输入 /clear 可清空）~%~%"
+                                      (ui-tag-warn "中断")
+                                      (if streamed
+                                          ""
+                                          (if (fboundp 'render-markdown)
+                                              (funcall 'render-markdown answer)
+                                              answer))
+                                      (length *session-history*))
+                              (if streamed
+                                  (format t "~%")
+                                  (format t "~%~A~%~A~%~%" (ui-colorize "1;32" "Agent >")
+                                          (if (fboundp 'render-markdown)
+                                              (funcall 'render-markdown answer)
+                                              answer)))))
                         (finish-output))
 
                    (error (e)
@@ -1665,7 +2201,6 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
   #-win32
   nil)
 
-
 ;;; ── 用户消息回显（历史定位） ─────────────────────────
 
 (defparameter *cli-user-echo-bg* "48;5;253"
@@ -1675,17 +2210,25 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
   "用户消息回显的前景色；浅色背景上用深色文字，保证可读。")
 
 (defun cli-erase-input-block (cursor-row)
-  "把刚提交的输入块整块擦掉（光标上移到块首行后清到屏幕底部），
-只保留随后打印的浅色背景用户消息。仅在 VT 可用的裸模式下调用。"
-  (when (and (integerp cursor-row) (>= cursor-row 0))
-    (let ((esc (code-char 27)))
+  "把刚提交的输入块整块擦掉（回到块起点后清到屏幕底部），只保留随后打印的
+浅色背景用户消息。仅在 VT 可用的裸模式下调用。
+定位优先用控制台绝对坐标（起点行第 0 列），折行、滚屏、窗口缩放都不会残留旧行；
+拿不到控制台信息时才退回相对上移的估算值。"
+  (let* ((esc (code-char 27))
+         (cy (nth-value 0 (win32-console-screen-info)))
+         (start *cli-input-start-y*)
+         (measured (and cy start (>= cy start) (< (- cy start) 4000) (- cy start)))
+         (back (or measured
+                   (and (integerp cursor-row) (>= cursor-row 0) cursor-row)
+                   0)))
+    (unless (and start (win32-set-cursor-position start 0))
       (format t "~C" #\Return)
-      (when (plusp cursor-row)
-        (format t "~C[~DA" esc cursor-row))
-      (format t "~C[J" esc)
-      (finish-output))
-    t))
-
+      (when (plusp back)
+        (format t "~C[~DA" esc back)))
+    (format t "~C[J" esc)
+    (finish-output)
+    (setf *cli-input-start-y* nil))
+  t)
 (defun cli-user-echo-line (text first)
   "把一行用户消息渲染成整行浅色背景条。首行带 You 标签，续行用等宽缩进对齐。
 彩色模式下右侧补空格铺满一行，形成连续的浅色区块；颜色关闭时输出纯文本。"
