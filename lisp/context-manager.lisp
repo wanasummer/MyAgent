@@ -508,10 +508,18 @@
               ((and ratio (>= ratio 0.50)) (ui-colorize "1;33" line))
               (t (ui-dim line)))))))
 
+(defvar *cli-last-print-source* nil
+  "最近一次终端打印的来源：:status 表示刚打印过底部状态栏，供自省状态灯吸附到该行最右侧。")
+
+(defvar *cli-status-line-width* 0
+  "最近一次底部状态栏的显示宽度（列）。")
+
 (defun ctx-status-print (&optional messages)
   "在 CLI 底部打印一行状态栏（无数据时不打印）。"
   (let ((line (ctx-status-render messages)))
     (when line
+      (setf *cli-last-print-source* :status
+            *cli-status-line-width* (display-width* line))
       (format t "~A~%" line)
       (finish-output)))
   nil)

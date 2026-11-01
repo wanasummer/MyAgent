@@ -188,6 +188,7 @@
   (dolist (row '(("/model" "配置 DeepSeek API Key（交互式输入）")
                  ("/model <sk-xxx>" "快捷设置 API Key")
                  ("/tools" "查看当前已注册的全部工具")
+                 ("/self intensity low|medium|high" "设置自省强度（默认高档）；/self status 查看当前档位")
                  ("/compact" "手动压缩历史：头尾保留，中段折叠为摘要")
                  ("/reload" "热重载全部 lisp/*.lisp 核心模块")
                  ("/rollback [baseline]" "回滚最近未验证的热重载修改（加 baseline 恢复启动快照）")
@@ -622,11 +623,20 @@ INPUT_RECORD 每条 20 字节：EventType@0、bKeyDown@4、wVirtualKeyCode@10、
 (defun %console-peek-records (count) (declare (ignore count)) nil)
 
 #+win32
-(defun %console-fetch-records (max)
-  "阻塞读取最多 max 条输入记录（至少一条可用时才返回）。
+(defun %console-wait-input (h timeout-ms)
+  "等待控制台输入句柄变为可读：0=有输入，258=超时。"
+  (let ((f (sb-alien:extern-alien "WaitForSingleObject"
+             (function sb-alien:unsigned-int sb-sys:system-area-pointer
+                       sb-alien:unsigned-int))))
+    (sb-alien:alien-funcall f h timeout-ms)))
+
+(defun %console-fetch-records (max &optional (timeout-ms 100))
+  "最多等待 timeout-ms 毫秒读取输入记录；超时返回 :timeout，让调用方继续处理提示与状态灯。
 每条记录返回 (ETYPE KEYDOWN REPEAT VK CHAR CTRL-STATE)。失败返回 nil。"
   (let ((h (%console-input-handle)))
     (when h
+      (when (= 258 (%console-wait-input h timeout-ms))
+        (return-from %console-fetch-records :timeout))
       (handler-case
           (let* ((read-input (sb-alien:extern-alien "ReadConsoleInputW"
                                (function sb-alien:int sb-sys:system-area-pointer
@@ -658,7 +668,7 @@ INPUT_RECORD 每条 20 字节：EventType@0、bKeyDown@4、wVirtualKeyCode@10、
         (error () nil)))))
 
 #-win32
-(defun %console-fetch-records (max) (declare (ignore max)) nil)
+(defun %console-fetch-records (max &optional (timeout-ms 100)) (declare (ignore max timeout-ms)) nil)
 
 #+win32
 (defun console-pending-char-p ()
@@ -920,6 +930,83 @@ INPUT_RECORD 每条 20 字节：EventType@0、bKeyDown@4、wVirtualKeyCode@10、
 (defparameter *render-trace* nil
   "最近 200 次输入区重绘的现场快照（:start 起始行 / :cy 当前光标行 / :back 回退行数 / :abs 绝对定位是否成功 / :rows 估算行数 / :crow 光标相对行），仅用于排查折行后重复新增行。")
 
+;;; ── 自省状态灯（提示栏最右侧常驻） ──────────────────
+(defvar *cli-status-row* nil
+  "底部状态栏在屏幕上的缓冲区行号；用于在其右端原位刷新自省状态灯。")
+
+(defvar *cli-status-line-text* nil
+  "最近一次打印的完整状态栏文本（含右侧状态灯），供插入自省提示时原样重印。")
+
+(defvar *cli-status-last* nil
+  "状态栏右端最近一次绘制的状态灯文本，避免重复刷新。")
+
+(defun cli-self-iteration-refresh-status ()
+  "在输入为空时原位刷新状态栏右端的状态灯（只在状态变化时写一次，不动输入行）。"
+  (when (and *cli-status-row* (fboundp 'self-iteration-indicator))
+    (let ((text (ignore-errors (self-iteration-indicator))))
+      (when (and (stringp text) (not (equal text *cli-status-last*)))
+        (let* ((w (console-width))
+               (iw (display-width* text))
+               (col (- (1- w) iw)))
+          (when (and (>= col 0)
+                     (or (null *cli-input-start-y*)
+                         (= *cli-status-row* (1- *cli-input-start-y*))))
+            (multiple-value-bind (cy cx) (win32-console-screen-info)
+              (when (and cy cx (win32-set-cursor-position *cli-status-row* col))
+                (finish-output)
+                (format t "~A" text)
+                (finish-output)
+                (win32-set-cursor-position cy cx)
+                (finish-output)
+                (setf *cli-status-last* text)))))))))
+
+
+(defvar *cli-indicator-y* nil
+  "状态灯所在行的缓冲区 Y 坐标；nil 表示当前未显示。")
+
+(defvar *cli-indicator-col* nil
+  "状态灯起始列（0 基）。")
+
+(defvar *cli-indicator-last-tick* 0
+  "上次状态灯动画刷新的时间（internal-real-time）。")
+(defvar *cli-indicator-offset* 0
+  "状态灯相对输入区首行的行偏移：1=吸附在上方状态栏那一行，0=画在输入行本身。")
+
+(defvar *cli-indicator-used* 0
+  "状态灯所在行已被占用的显示宽度，用于判断右侧是否还放得下。")
+
+(defun cli-draw-indicator (&key text row col)
+  "在 (ROW, COL) 绘制状态灯并恢复原光标；无控制台能力时静默跳过。"
+  (when (and text row col)
+    ;; 先把缓冲输出真正刷到控制台，再挪光标，避免文字写到错误位置
+    (finish-output)
+    (multiple-value-bind (cy cx) (win32-console-screen-info)
+      (when (and cy cx (win32-set-cursor-position row col))
+        (format t "~A" text)
+        (finish-output)
+        (win32-set-cursor-position cy cx)
+        (finish-output)
+        t))))
+
+(defun cli-indicator-show (&key (used 0) row)
+  "计算并绘制状态灯：首行剩余空间足够才显示，避免覆盖正文。"
+  (let* ((text (and (fboundp 'self-iteration-indicator)
+                    (ignore-errors (self-iteration-indicator))))
+         (w (and text (display-width* text)))
+         (width (console-width))
+         (y (or row (nth-value 0 (win32-console-screen-info)))))
+    (cond
+      ((null text) (setf *cli-indicator-y* nil) nil)
+      ((and w y (>= width (+ used w 2)))
+       (setf *cli-indicator-y* y
+             *cli-indicator-col* (- width w))
+       (cli-draw-indicator :text text :row y :col (- width w)))
+      (t (setf *cli-indicator-y* nil) nil))))
+
+(defun cli-self-iteration-animate ()
+  "等待按键时按需刷新状态栏右端的状态灯（状态变化才重绘，避免闪烁与干扰输入）。"
+  (ignore-errors (cli-self-iteration-refresh-status)))
+
 (defun cli-render-input (drawn-rows prefix label text &key cursor hint (cursor-row nil) layout-text)
   "把输入区重画为 prefix + label + text [+ hint]，光标定位到 text 内 cursor 处。
 drawn-rows 是上一次绘制占用的行数（用于精确回退，避免滚屏后错位重绘）。
@@ -1076,6 +1163,7 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
   (setf *cli-input-start-y* (nth-value 0 (win32-console-screen-info)))
   (unless prefix-printed
     (when prefix (format t "~A" prefix) (finish-output)))
+  (setf *cli-indicator-y* nil)
   (let* ((typed (make-array 0 :element-type 'character :adjustable t :fill-pointer 0))
          (paste nil)
          (paste-parts 0)
@@ -1241,6 +1329,31 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                                     :cursor-row (if *cli-input-start-y* nil drawn-cursor-row))
                 (setf drawn-rows rows
                       drawn-cursor-row crow))))
+         (flush-notices-above ()
+           ;; 自省提示：插到状态栏上方，状态栏与输入内容都原样保留。
+           (let ((items (and (fboundp 'self-iteration-drain-notices)
+                             (self-iteration-drain-notices))))
+             (when items
+               (let* ((esc (code-char 27))
+                      (has-status (and *cli-status-line-text* *cli-input-start-y*))
+                      (base (if has-status (1- *cli-input-start-y*) *cli-input-start-y*)))
+                 (unless (and base (win32-set-cursor-position base 0))
+                   (when (plusp drawn-cursor-row)
+                     (format t "~C[~DA" esc drawn-cursor-row)))
+                 (format t "~C" #\Return)
+                 (format t "~C[J" esc)
+                 (finish-output)
+                 (dolist (item items)
+                   (format t "~A ~A~%" (ui-tag-info "自省") item))
+                 (when has-status
+                   (format t "~A~%" *cli-status-line-text*))
+                 (finish-output)
+                 (setf *cli-input-start-y* (nth-value 0 (win32-console-screen-info))
+                       *cli-status-row* (and has-status
+                                             (1- (nth-value 0 (win32-console-screen-info))))
+                       drawn-rows 1
+                       drawn-cursor-row 0)
+                 (render)))))
          (echo-char (ch)
             (write-char ch)
             (finish-output)
@@ -1614,8 +1727,14 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                     (handle-char ch))))))))
       (let ((empty-polls 0))
         (loop until done
-              do (let ((recs (ignore-errors (%console-fetch-records 256))))
+              do (when (and (> (ms-since last-char-time) 400) (null paste))
+                   (flush-notices-above))
+                 (let ((recs (ignore-errors (%console-fetch-records 256))))
                    (cond
+                     ((eq recs :timeout)
+                      (when (> (ms-since last-char-time) 300)
+                        (cli-self-iteration-animate))
+                      (sleep 0.01))
                      ((null recs)
                       (cond
                         ;; 防死锁：在 eval_lisp 自测环境下，mock 的 %console-fetch-records
@@ -1631,6 +1750,7 @@ prefix 是该行开头的静态文字（用于重绘）；prefix-printed 表示�
                         ((null (%console-input-handle))
                          (setf result :eof done t))
                         (t
+                         (cli-self-iteration-animate)
                          (sleep 0.01))))
                      (t
                       (setf empty-polls 0)
@@ -1727,18 +1847,45 @@ Windows 真控制台走裸模式行编辑器；其余情况退回 read-line。"
                    (setf acc (format nil "~A~%~A" acc next))))
         acc)))
 
+(defun cli-status-line-with-indicator (line)
+  "把自省状态灯拼到状态栏同一行的最右侧；空间不足时紧跟在状态栏后面。"
+  (let* ((ind (and (fboundp 'self-iteration-indicator)
+                   (ignore-errors (self-iteration-indicator))))
+         (w (max 2 (console-width)))
+         (target (1- w))
+         (lw (if (stringp line) (display-width* line) 0))
+         (iw (if ind (display-width* ind) 0)))
+    (cond
+      ((null line) nil)
+      ((null ind) line)
+      ((>= (- target lw iw) 1)
+       (concatenate 'string line
+                    (make-string (- target lw iw) :initial-element #\Space)
+                    ind))
+      (t (concatenate 'string line "  " ind)))))
+
 (defun cli-prompt-repaint ()
-  "读取输入前重绘底部状态栏。
+  "读取输入前重绘底部状态栏（右侧拼上自省状态灯）。
 主循环是常驻的已编译代码，热重载改不了其中已经执行到的语句；
 而 read-cli-input 的调用是晚绑定的，重载即生效，所以把状态栏放在这里：
-先擦掉外层刚打印的 `You >` 提示符，打印状态栏，再重印提示符。"
+先擦掉外层刚打印的 `You >` 提示符，打印状态栏，再重印提示符。
+状态灯只在这里随状态栏静态打印，不对输入行做任何光标操作。"
   (ignore-errors (cli-paste-enable))
+  (setf *cli-last-print-source* nil
+        *cli-status-line-width* 0
+        *cli-indicator-y* nil)
   (when (and (fboundp 'ui-color-on-p) (ignore-errors (ui-color-on-p)))
-    (let ((line (and (fboundp 'ctx-status-render)
-                     (funcall 'ctx-status-render *session-history*))))
+    (let* ((line (and (fboundp 'ctx-status-render)
+                      (funcall 'ctx-status-render *session-history*)))
+           (composed (cli-status-line-with-indicator line)))
       ;; \r + ESC[2K：回到行首并整行擦除（清掉已打印的提示符）
       (format t "~C~C[2K" #\Return (code-char 27))
-      (when line (format t "~A~%" line))
+      (let ((row (nth-value 0 (win32-console-screen-info))))
+        (when composed (format t "~A~%" composed))
+        (setf *cli-status-row* row
+              *cli-status-line-text* composed
+              *cli-status-last* (and (fboundp 'self-iteration-indicator)
+                                     (ignore-errors (self-iteration-indicator)))))
       (format t "~A" (cli-input-prefix))
       (finish-output))))
 
@@ -2080,6 +2227,15 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
        (finish-output)
        :handled)
 
+      ((or (string-equal trimmed "/self")
+           (and (> (length trimmed) 6)
+                (string-equal "/self " (subseq trimmed 0 6))))
+       (if (fboundp 'self-iteration-handle-command)
+           (funcall 'self-iteration-handle-command (trim-whitespace (subseq trimmed 5)))
+            (format t "  ~A 自省模块未加载。~%~%" (ui-tag-err "失败")))
+       (finish-output)
+       :handled)
+
       ((or (and (>= (length trimmed) 1) (char= (char trimmed 0) #\,))
            (and (>= (length trimmed) 6) (string-equal "/eval " (subseq trimmed 0 6))))
        (let* ((code (if (char= (char trimmed 0) #\,)
@@ -2102,7 +2258,9 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
   (let ((config (resolve-llm-config :allow-empty-key t)))
     (print-cli-banner config)
     (loop for input-count from 1
-          do (format t "~A " (ui-colorize "1;36" "You >"))
+          do (when (fboundp 'self-iteration-flush-notices)
+               (funcall 'self-iteration-flush-notices))
+             (format t "~A " (ui-colorize "1;36" "You >"))
       (finish-output)
       (let ((line (handler-case (read-cli-input)
                     (end-of-file () :eof)
@@ -2121,6 +2279,8 @@ Windows 真控制台：程序自己接管回显，多行粘贴不回显，只在
                 (return))))
         (let ((trimmed (trim-whitespace line)))
           (when (> (length trimmed) 0)
+            (when (fboundp 'self-iteration-note-activity)
+              (funcall 'self-iteration-note-activity))
             (let ((cmd-status (funcall 'handle-slash-command trimmed)))
               (cond
                 ((eq cmd-status :exit) (return))

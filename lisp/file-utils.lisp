@@ -171,24 +171,144 @@
 
 ;;; ── 3. 写入文件 (write_file) ─────────────────────────
 
-(defun write-file-text (file-path content)
-  "创建或覆写文件，自动创建父目录。"
+;;; ── 安全写入：语法校验 / 备份 / 原子替换 / 崩溃恢复日志 ──────
+
+(defun myagent-lisp-path-p (path)
+  "判断路径是否以 .lisp 结尾（file-utils 先于 tools.lisp 加载，故自带一份）。"
+  (let ((norm (normalize-slashes (or path ""))))
+    (and (>= (length norm) 5)
+         (string-equal ".lisp" (subseq norm (- (length norm) 5))))))
+
+(defun myagent-lisp-source-balanced-p (text)
+  "粗略校验 Lisp 源码括号是否配平：忽略字符串、行注释、块注释与字符字面量。
+只用于拦截「写到一半被中断」造成的截断文件，不替代编译器。"
+  (let ((depth 0) (block 0) (i 0) (n (length (or text "")))
+        (in-string nil) (escape nil) (ok t))
+    (loop while (and ok (< i n)) do
+      (let ((ch (char text i)))
+        (cond
+          (in-string
+           (cond (escape (setf escape nil))
+                 ((char= ch #\\) (setf escape t))
+                 ((char= ch #\") (setf in-string nil))))
+          ((plusp block)
+           (cond ((and (char= ch #\|) (< (1+ i) n) (char= (char text (1+ i)) #\#))
+                  (decf block) (incf i))
+                 ((and (char= ch #\#) (< (1+ i) n) (char= (char text (1+ i)) #\|))
+                  (incf block) (incf i))))
+          ((char= ch #\") (setf in-string t))
+          ((char= ch #\;) (setf i (or (position #\Newline text :start i) n)))
+          ((and (char= ch #\#) (< (1+ i) n) (char= (char text (1+ i)) #\|))
+           (setf block 1) (incf i))
+          ((and (char= ch #\#) (< (1+ i) n) (char= (char text (1+ i)) #\\))
+           (incf i))
+          ((char= ch #\() (incf depth))
+          ((char= ch #\))
+           (decf depth)
+           (when (minusp depth) (setf ok nil)))))
+      (incf i))
+    (and ok (zerop depth) (zerop block) (not in-string))))
+
+(defun myagent-backup-dir ()
+  "备份与恢复日志目录（项目根下的 .myagent/backups）。
+注意：resolve-path 会丢掉路径段开头的点，所以这里直接拼绝对路径。"
+  (resolve-path (format nil "~A/.myagent/backups" (resolve-path "."))))
+
+(defun myagent-journal-path ()
+  "崩溃恢复日志路径：记录「正在替换的目标文件 + 备份文件」。"
+  (format nil "~A/pending-edit.sexp" (myagent-backup-dir)))
+
+(defun myagent-backup-current-file (resolved)
+  "把目标文件当前内容复制一份到备份目录；文件不存在返回 nil。"
+  (let ((pn (native-file-pathname resolved)))
+    (when (uiop:file-exists-p pn)
+      (let* ((dir (myagent-backup-dir))
+             (name (file-namestring pn))
+             (dst (format nil "~A/~A.~D.bak" dir name (get-universal-time))))
+        (ensure-directories-exist (native-file-pathname dst))
+        (ignore-errors (uiop:copy-file pn (native-file-pathname dst)))
+        dst))))
+
+(defun myagent-write-file-direct (path text)
+  "直接写文件（不备份、不校验），仅供恢复日志等内部使用。"
+  (ensure-directories-exist (native-file-pathname path))
+  (with-open-file (out (native-file-pathname path)
+                       :direction :output :if-exists :supersede
+                       :if-does-not-exist :create :external-format :utf-8)
+    (write-string (or text "") out)
+    (finish-output out))
+  t)
+
+(defun myagent-write-journal (target backup)
+  "写崩溃恢复日志（先写临时文件再替换，避免日志自身写坏）。"
+  (let* ((j (myagent-journal-path))
+         (tmp (format nil "~A.tmp" j))
+         (body (format nil "(:target ~S :backup ~S :time ~D)~%"
+                       target backup (get-universal-time))))
+    (ignore-errors
+      (myagent-write-file-direct tmp body)
+      (myagent-replace-file tmp j))))
+
+(defun myagent-replace-file (tmp target)
+  "用 TMP 替换 TARGET：优先原子 move；被占用等原因失败时退化为直接覆写。
+覆写期间若进程被强制结束，由启动期的 pending-edit 日志 + 备份兜底还原。"
+  (let ((moved
+          #+win32
+          (progn
+            (ignore-errors
+              (uiop:run-program (list "cmd" "/c" "move" "/Y"
+                                      (uiop:native-namestring (native-file-pathname tmp))
+                                      (uiop:native-namestring (native-file-pathname target)))
+                                :output :string :error-output :string :ignore-error-status t))
+            (and (uiop:file-exists-p (native-file-pathname target))
+                 (not (uiop:file-exists-p (native-file-pathname tmp)))
+                 t))
+          #-win32
+          (progn
+            (ignore-errors (rename-file (native-file-pathname tmp) (native-file-pathname target)))
+            (and (uiop:file-exists-p (native-file-pathname target))
+                 (not (uiop:file-exists-p (native-file-pathname tmp)))
+                 t))))
+    (if moved
+        t
+        (let ((txt (ignore-errors
+                     (uiop:read-file-string (native-file-pathname tmp) :external-format :utf-8))))
+          (when (stringp txt)
+            (ignore-errors (myagent-write-file-direct target txt))
+            (ignore-errors (delete-file (native-file-pathname tmp)))
+            (uiop:file-exists-p (native-file-pathname target)))))))
+
+(defun myagent-atomic-write (file-path text)
+  "安全写文件：Lisp 源码先做括号配平校验，再备份、写临时文件、原子替换。
+任一步失败都保持原文件不变；成功返回 t。"
   (handler-case
-      (let* ((resolved (resolve-path file-path))
-             (pn (native-file-pathname resolved)))
+      (let* ((file-path (if (stringp file-path) file-path (uiop:native-namestring file-path)))
+             (resolved (resolve-path file-path))
+             (pn (native-file-pathname resolved))
+             (content (or text ""))
+             (tmp (format nil "~A.tmp-~D-~D" resolved (get-universal-time) (random 1000000))))
         (ensure-directories-exist pn)
-        (with-open-file (out pn :direction :output
-                                :if-exists :supersede
-                                :if-does-not-exist :create
-                                :external-format :utf-8)
-          (write-string (or content "") out))
-        (format t "  ~A 已写入文件: ~A~%" (ui-tag-ok "写入") resolved)
-        t)
+        (let ((backup (myagent-backup-current-file resolved)))
+          (myagent-write-file-direct tmp content)
+          (myagent-write-journal resolved backup)
+          (unless (myagent-replace-file tmp resolved)
+            (ignore-errors (delete-file (native-file-pathname tmp)))
+            (error "原子替换目标文件失败"))
+          (ignore-errors (delete-file (native-file-pathname (myagent-journal-path))))
+          t))
     (error (e)
-      (format *error-output* "  ~A 写入文件失败: ~A~%" (ui-tag-err "失败") e)
+      (format *error-output* "  [失败] 安全写入失败: ~A~%" e)
       nil)))
 
-;;; ── 4. 追加文件 (append_file) ────────────────────────
+;;; ── 3. 写入文件 (write_file) ─────────────────────────
+
+(defun write-file-text (file-path content)
+  "创建或覆写文件（安全写入：语法校验 + 备份 + 原子替换 + 崩溃恢复日志）。"
+  (let* ((resolved (resolve-path file-path))
+         (ok (myagent-atomic-write resolved (or content ""))))
+    (when ok
+      (format t "  ~A 已写入文件: ~A~%" (ui-tag-ok "写入") resolved))
+    ok))
 
 (defun append-file-text (file-path content)
   "向已有文件末尾追加一行文本，若不存在则创建。"
@@ -203,7 +323,7 @@
                                       :external-format :utf-8)
                 (write-string (or content "") out)
                 (terpri out))
-              (format t "  ~A 已追加内容到文件: ~A~%" (ui-tag-ok "追加") resolved)
+              (format t "~A 已追加内容到文件: ~A~%" (ui-tag-ok "追加") resolved)
               t)))
     (error (e)
       (format *error-output* "  ~A 追加文件失败: ~A~%" (ui-tag-err "失败") e)

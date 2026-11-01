@@ -43,6 +43,8 @@
      "lisp/cancel.lisp"
     "lisp/supervisor.lisp"
     "lisp/tools.lisp"
+    "lisp/self-iteration.lisp"
+    "lisp/self-iteration-shadow.lisp"
     "lisp/agent-loop.lisp"
     "lisp/context-manager.lisp"
     "lisp/cli.lisp")
@@ -70,7 +72,11 @@
   (ignore-errors (uiop:read-file-string pathname :external-format :utf-8)))
 
 (defun safe-write-file-content (pathname content)
-  "把字符串安全写入文件（自动创建父目录），成功返回 t。"
+  "把字符串安全写入文件（自动创建父目录），成功返回 t。
+若 file-utils 已加载，则走「校验 + 备份 + 原子替换 + 恢复日志」的安全路径。"
+  (when (fboundp 'myagent-atomic-write)
+    (return-from safe-write-file-content
+      (funcall 'myagent-atomic-write pathname content)))
   (handler-case
       (progn
         (ensure-directories-exist pathname)

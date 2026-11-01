@@ -471,7 +471,7 @@
 
 ;;; ── Agent 主循环 ─────────────────────────────────────
 
-(defun run-agent (user-input &optional history)
+(defun run-agent-core (user-input &optional history)
   "执行一次完整的 ReAct Agent 对话循环。
 返回 plist: (:answer string :history list :input-tokens int :output-tokens int [:cancelled t])
 
@@ -547,7 +547,7 @@
                    (when (eq call-status :cancelled)
                      (log-line "~%~A 第 ~D 轮请求已中断，上下文已保留~%"
                                (ui-tag-warn "中断") turns)
-                     (return-from run-agent
+                     (return-from run-agent-core
                        (make-cancelled-result messages total-in-tokens total-out-tokens
                                               turns tool-calls)))
                    ;; LLM 请求成功返回 → 确认此前热重载的代码未破坏核心通信链路
@@ -599,7 +599,7 @@
                         (when (agent-cancelled-p)
                           (log-line "~%~A 工具执行已中断，上下文已保留~%"
                                     (ui-tag-warn "中断"))
-                          (return-from run-agent
+                          (return-from run-agent-core
                             (make-cancelled-result messages total-in-tokens total-out-tokens
                                                    turns tool-calls))))
 
@@ -614,7 +614,7 @@
                                          (ui-tag-ok "完成")
                                          (length answer) turns tool-calls total-tok
                                          total-in-tokens total-out-tokens)
-                               (return-from run-agent
+                               (return-from run-agent-core
                                  (list :answer answer
                                        :history messages
                                        :input-tokens total-in-tokens
@@ -635,7 +635,7 @@
                                      (format nil "模型在本轮未返回任何文本内容（stop_reason=~A，content blocks=[~A]）。可能原因：输出被截断、模型只返回了思考/工具块、或服务端响应异常。建议重试本次提问；若持续出现，可用 /reload 检查配置或 /model 重新确认 Key。"
                                              stop-reason (describe-content-blocks content))))
                                (log-line "~A ~A~%" (ui-tag-warn "警告") diagnostic)
-                               (return-from run-agent
+                               (return-from run-agent-core
                                  (list :answer diagnostic
                                        :history messages
                                        :input-tokens total-in-tokens
@@ -653,3 +653,19 @@
             :input-tokens total-in-tokens
             :output-tokens total-out-tokens))))
 )
+
+
+;;; ── 自监管迭代：前后台互斥包装 ───────────────────────
+;;; 真正的 ReAct 循环在 run-agent-core 中；run-agent 只负责在任务执行期间
+;;; 给空闲自省子 Agent 打上「前台忙」标记，保证两者不会同时调用 LLM。
+
+(defun run-agent (user-input &optional history)
+  "执行一次完整的 ReAct Agent 对话循环（带前后台互斥标记）。"
+  (when (fboundp 'self-iteration-observe-user-input)
+    (funcall 'self-iteration-observe-user-input user-input))
+  (when (fboundp 'self-iteration-begin-task)
+    (funcall 'self-iteration-begin-task))
+  (unwind-protect
+       (run-agent-core user-input history)
+    (when (fboundp 'self-iteration-end-task)
+      (funcall 'self-iteration-end-task))))

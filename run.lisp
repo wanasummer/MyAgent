@@ -28,6 +28,8 @@
     ;; 这样即使 tools.lisp 被改坏，回滚引擎依然可用。
     "lisp/reload-engine.lisp"
     "lisp/tools.lisp"
+    "lisp/self-iteration.lisp"
+    "lisp/self-iteration-shadow.lisp"
     "lisp/agent-loop.lisp"
     "lisp/context-manager.lisp"
     "lisp/cli.lisp")
@@ -38,8 +40,28 @@
   (uiop:pathname-directory-pathname
    (or *load-truename* *compile-file-truename* (uiop:getcwd))))
 
+;;; ── 启动期崩溃恢复（安全写入的配套） ────────────────
+
+(defun recover-pending-file-edit ()
+  "启动前检查安全写入留下的恢复日志：只要日志还在，说明上次写文件没有走完收尾，
+就用备份还原目标文件；这样即使窗口被强行关闭，也不会带着半截源码启动。"
+  (let* ((journal (merge-pathnames ".myagent/backups/pending-edit.sexp" (uiop:getcwd)))
+         (restored 0))
+    (when (uiop:file-exists-p journal)
+      (let* ((data (ignore-errors (with-open-file (in journal) (read in nil nil))))
+             (target (and (listp data) (getf data :target)))
+             (backup (and (listp data) (getf data :backup))))
+        (when (and (stringp target) (stringp backup) (uiop:file-exists-p backup))
+          (ensure-directories-exist target)
+          (when (ignore-errors (uiop:copy-file backup target) t)
+            (incf restored)
+            (format t "  [恢复] 上次写文件被中断，已用备份还原: ~A~%" target))))
+      (ignore-errors (delete-file journal)))
+    restored))
+
 (defun load-core-modules ()
   "按顺序加载全部核心模块，并初始化热重载快照。"
+  (recover-pending-file-edit)
   (let ((base-dir (startup-base-dir)))
     (dolist (m *startup-modules*)
       (load (merge-pathnames m base-dir) :external-format :utf-8))
